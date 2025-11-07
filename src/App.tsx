@@ -73,7 +73,7 @@ function WindowUpperMenuTab({
         aria-expanded={open}
         aria-haspopup="true"
       >
-        <span className="select-none pointer-events-none">{name}</span>
+        <span className="select-none pointer-events-none text-[13px]">{name}</span>
       </button>
 
       {open && (
@@ -89,7 +89,7 @@ function WindowUpperMenuTab({
                     setOpen(false);
                   }
                 }}
-                className="w-full flex items-center justify-between gap-2 px-2 py-0.5 rounded-sm hover:bg-(--background-color) text-sm"
+                className="w-full flex items-center justify-between gap-2 px-2 py-0.5 rounded-sm hover:bg-(--background-color) text-[13px]"
               >
                 <span className="truncate">{opt.text}</span>
                 {opt.keybindSuggestion ? (
@@ -176,7 +176,55 @@ function App() {
         </div>
       </div>
       <div className="flex-1 flex w-full border-t border-(--token-functions)">
-        <div className="w-xs max-w-xs shrink-0 bg-(--background-secondary-color)"></div>
+        <div className="w-xs max-w-xs shrink-0 bg-(--background-secondary-color) flex flex-col justify-between border-r border-(--token-functions)">
+          <div></div>
+          <div className="p-1 border-t border-(--token-functions) flex items-center justify-between">
+            <div className="flex items-center gap-0.5">
+              <div className="flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors">
+                <span className="text-xs">Typescript</span>
+              </div>
+              <div className="flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors">
+                <span className="text-xs c text-blue-300">154:49</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-0.5">
+              <div className="flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors">
+                <div className="c text-red-400">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="1em"
+                    height="1em"
+                    viewBox="0 0 24 24"
+                    className="c"
+                  >
+                    <path
+                      fill="currentColor"
+                      d="M12 17q.425 0 .713-.288Q13 16.425 13 16t-.287-.713Q12.425 15 12 15t-.712.287Q11 15.575 11 16t.288.712Q11.575 17 12 17Zm0-4q.425 0 .713-.288Q13 12.425 13 12V8q0-.425-.287-.713Q12.425 7 12 7t-.712.287Q11 7.575 11 8v4q0 .425.288.712q.287.288.712.288Zm0 9q-2.075 0-3.9-.788q-1.825-.787-3.175-2.137q-1.35-1.35-2.137-3.175Q2 14.075 2 12t.788-3.9q.787-1.825 2.137-3.175q1.35-1.35 3.175-2.138Q9.925 2 12 2t3.9.787q1.825.788 3.175 2.138q1.35 1.35 2.137 3.175Q22 9.925 22 12t-.788 3.9q-.787 1.825-2.137 3.175q-1.35 1.35-3.175 2.137Q14.075 22 12 22Zm0-2q3.35 0 5.675-2.325Q20 15.35 20 12q0-3.35-2.325-5.675Q15.35 4 12 4Q8.65 4 6.325 6.325Q4 8.65 4 12q0 3.35 2.325 5.675Q8.65 20 12 20Zm0-8Z"
+                    />
+                  </svg>
+                </div>
+                <span className="text-xs">0 Errors</span>
+              </div>
+              <div className="flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors">
+                <div className="c text-yellow-400">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="1em"
+                    height="1em"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      fill="currentColor"
+                      d="M12 5.99L19.53 19H4.47zM2.74 18c-.77 1.33.19 3 1.73 3h15.06c1.54 0 2.5-1.67 1.73-3L13.73 4.99c-.77-1.33-2.69-1.33-3.46 0zM11 11v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1m0 5h2v2h-2z"
+                    />
+                  </svg>
+                </div>
+                <span className="text-xs">1 Warning</span>
+              </div>
+            </div>
+          </div>
+        </div>
         <div className="flex-1"></div>
       </div>
     </div>

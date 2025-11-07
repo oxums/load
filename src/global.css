@@ -10,7 +10,7 @@ button {
     cursor: pointer;
 }
 
-:not(.c) {
+:not(.c):not(svg):not(path):not(stroke-path) {
     @apply text-[var(--text-color)];
 }
 
