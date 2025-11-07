@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+body {
+    @apply bg-[var(--background-color)] text-[var(--text-color)];
+    @apply font-[var(--ui-font-family)] text-[var(--ui-font-size)] leading-[var(--ui-line-height)];
+}
+
+#root,
+html,
+body,
+.full {
+    @apply w-full h-full;
+}
+
+.editor-styling {
+    @apply bg-[var(--background-color)];
+    @apply font-[var(--editor-font-family)] text-[var(--editor-font-size)] leading-[var(--editor-line-height)];
+}
+
+@theme {
+    --token-types: var(--token-types);
+    --token-numbers: var(--token-numbers);
+    --token-strings: var(--token-strings);
+    --token-comments: var(--token-comments);
+    --token-keywords: var(--token-keywords);
+    --token-functions: var(--token-functions);
+    --token-variables: var(--token-variables);
+    --token-untokenized: var(--token-untokenized);
+
+    --background-color: var(--background-color);
+    --background-secondary-color: var(--background-secondary-color);
+    --background-accent-color: var(--background-accent-color);
+    --text-color: var(--text-color);
+
+    --editor-font-family: var(--editor-font-family);
+    --editor-font-size: var(--editor-font-size);
+    --editor-line-height: var(--editor-line-height);
+
+    --ui-font-family: var(--ui-font-family);
+    --ui-font-size: var(--ui-font-size);
+    --ui-line-height: var(--ui-line-height);
+}
