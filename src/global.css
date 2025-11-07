@@ -1,8 +1,17 @@
 @import "tailwindcss";
 
-body {
+body,
+#root {
     @apply bg-[var(--background-color)] text-[var(--text-color)];
     @apply font-[var(--ui-font-family)] text-[var(--ui-font-size)] leading-[var(--ui-line-height)];
+}
+
+button {
+    cursor: pointer;
+}
+
+:not(.c) {
+    @apply text-[var(--text-color)];
 }
 
 #root,
