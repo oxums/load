@@ -14,6 +14,10 @@ button {
     @apply text-[var(--text-color)];
 }
 
+.nice {
+    @apply flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors;
+}
+
 #root,
 html,
 body,

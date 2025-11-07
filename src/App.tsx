@@ -176,20 +176,20 @@ function App() {
         </div>
       </div>
       <div className="flex-1 flex w-full border-t border-(--token-functions)">
-        <div className="w-xs max-w-xs shrink-0 bg-(--background-secondary-color) flex flex-col justify-between border-r border-(--token-functions)">
+        <div className="w-xs max-w-[18rem] shrink-0 bg-(--background-secondary-color) flex flex-col justify-between border-r border-(--token-functions)">
           <div></div>
           <div className="p-1 border-t border-(--token-functions) flex items-center justify-between">
             <div className="flex items-center gap-0.5">
-              <div className="flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors">
+              <div className="nice">
                 <span className="text-xs">Typescript</span>
               </div>
-              <div className="flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors">
+              <div className="nice">
                 <span className="text-xs c text-blue-300">154:49</span>
               </div>
             </div>
 
             <div className="flex items-center gap-0.5">
-              <div className="flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors">
+              <div className="nice">
                 <div className="c text-red-400">
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
@@ -206,7 +206,7 @@ function App() {
                 </div>
                 <span className="text-xs">0 Errors</span>
               </div>
-              <div className="flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors">
+              <div className="nice">
                 <div className="c text-yellow-400">
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
