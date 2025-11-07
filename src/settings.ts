@@ -44,14 +44,25 @@ export async function getSettings() {
   try {
     const raw_settings = (await invoke("get_settings")) as string;
     const parsed = JSON.parse(raw_settings);
+
+    if (parsed.__error) {
+      logError(
+        "Error in settings retrieved from backend, using defaults. Error: " +
+          parsed.__error,
+      );
+      return cache;
+    }
+
     const settings = deepMerge({ ...defaultValues }, parsed);
     cache = settings;
-    
+
     log("Settings loaded successfully.");
   } catch (e) {
     console.error("Failed to load settings, using defaults.", e);
-    logError("Failed to load settings, using defaults.");
+    logError(
+      "Failed to load settings, using defaults. Error: " + (e as Error).message,
+    );
   }
-  
+
   return cache;
 }
