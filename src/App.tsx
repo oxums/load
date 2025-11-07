@@ -112,9 +112,9 @@ function App() {
   const [windowTitle, setWindowTitle] = useState("");
 
   return (
-    <div className="grid grid-rows-24 full fix">
+    <div className="h-screen flex flex-col">
       <div
-        className="row-span-1 bg-(--background-secondary-color) flex justify-between items-center min-h-6 max-h-8"
+        className="shrink-0 bg-(--background-secondary-color) flex justify-between items-center min-h-6 max-h-8"
         onMouseDown={(e) => {
           if (e.buttons === 1) {
             e.detail === 2
@@ -175,7 +175,10 @@ function App() {
           />
         </div>
       </div>
-      <div className="row-span-23"></div>
+      <div className="flex-1 flex w-full border-t border-(--token-functions)">
+        <div className="w-xs max-w-xs shrink-0 bg-(--background-secondary-color)"></div>
+        <div className="flex-1"></div>
+      </div>
     </div>
   );
 }
