@@ -73,7 +73,9 @@ function WindowUpperMenuTab({
         aria-expanded={open}
         aria-haspopup="true"
       >
-        <span className="select-none pointer-events-none text-[13px]">{name}</span>
+        <span className="select-none pointer-events-none text-[13px]">
+          {name}
+        </span>
       </button>
 
       {open && (
@@ -148,7 +150,7 @@ function App() {
             {windowTitle}
           </span>
         </div>
-        <div className="flex items-center flex-row-reverse gap-2 px-2">
+        <div className="flex items-center flex-row-reverse gap-2 px-2 select-none">
           <button
             className="w-[11.5px] h-[11.5px] rounded-full bg-red-500 border border-black/10 hover:bg-red-400 transition-colors"
             aria-label="Close"
