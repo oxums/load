@@ -18,6 +18,15 @@ button {
     @apply flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors;
 }
 
+::-webkit-scrollbar {
+    display: none;
+}
+
+* {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
 #root,
 html,
 body,

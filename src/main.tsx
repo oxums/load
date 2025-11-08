@@ -6,6 +6,7 @@ import Loading from "./Loading";
 import { setCSSvar } from "./utils";
 import { getSettings } from "./settings";
 import { globalKeybinds } from "./keybinds";
+import { invoke } from "@tauri-apps/api/core";
 
 async function applyTheme() {
   const settings = await getSettings();
@@ -51,7 +52,7 @@ function AppLoader() {
     setCSSvar("--text-color", "white");
   });
 
-  const tasks = [getSettings, applyTheme];
+  const tasks = [getSettings, applyTheme, () => invoke("ready")];
 
   useEffect(() => {
     Promise.all(tasks.map((task) => task())).then(() => {

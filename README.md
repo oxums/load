@@ -6,6 +6,11 @@ Lightweight text editor for quick file editing tasks.
 
 Zed.dev, my current favorite text editor.
 
+## Made for an hackaton
+
+This project was made for the Build-a-thon hackaton and some things aren't polished.
+Copilot AI was used in the development mainly for boilerplate code / boring tasks.
+
 ## File load system
 
 - Send state to UI

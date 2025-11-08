@@ -29,6 +29,13 @@ const defaultValues = {
     variables: "#f38ba8", // red
     untokenized: "#cdd6f4", // text
   },
+
+  autosave: {
+    enabled: true,
+    debounceMs: 800,
+    intervalMs: 0,
+    onBlur: true,
+  },
 };
 
 let cache = {
