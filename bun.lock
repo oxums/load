@@ -11,7 +11,6 @@
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
         "tailwindcss": "^4.1.17",
-        "tauri-plugin-system-fonts-api": "^2.0.2",
       },
       "devDependencies": {
         "@tauri-apps/cli": "^2",
@@ -345,8 +344,6 @@
     "tailwindcss": ["tailwindcss@4.1.17", "", {}, "sha512-j9Ee2YjuQqYT9bbRTfTZht9W/ytp5H+jJpZKiYdP/bpnXARAuELt9ofP0lPnmHjbga7SNQIxdTAXCmtKVYjN+Q=="],
 
     "tapable": ["tapable@2.3.0", "", {}, "sha512-g9ljZiwki/LfxmQADO3dEY1CbpmXT5Hm2fJ+QaGKwSXUylMybePR7/67YW7jOrrvjEgL1Fmz5kzyAjWVWLlucg=="],
-
-    "tauri-plugin-system-fonts-api": ["tauri-plugin-system-fonts-api@2.0.2", "", { "dependencies": { "@tauri-apps/api": "^2.0.0" } }, "sha512-ewgkpl8RavtdLfXTvk3uZcS+Bj71yYYY7ItyJXDqohiUe+nkSzk8dyGZc1GUVj4BKQqnesVWwO4FG/Atm8t8Ug=="],
 
     "tinyglobby": ["tinyglobby@0.2.15", "", { "dependencies": { "fdir": "^6.5.0", "picomatch": "^4.0.3" } }, "sha512-j2Zq4NyQYG5XMST4cbs02Ak8iJUdxRM0XI5QyxXuZOzKOINmWurp3smXu3y5wDcJrptwpSjgXHzIQxR0omXljQ=="],
 

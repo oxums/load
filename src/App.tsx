@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { X } from "lucide-react";
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { useState } from "react";
 
 function FluentMinimize24Regular() {
@@ -132,7 +133,7 @@ function App() {
               {
                 text: "About",
                 onClick: () => {
-                  console.log("About clicked");
+                  openUrl("https://github.com/oxums/load#load-editor");
                 },
               },
               {
@@ -183,10 +184,12 @@ function App() {
           <div className="p-1 border-t border-(--token-functions) flex items-center justify-between">
             <div className="flex items-center gap-0.5">
               <div className="nice">
-                <span className="text-xs">Typescript</span>
+                <span className="text-xs select-none">Typescript</span>
               </div>
               <div className="nice">
-                <span className="text-xs c text-blue-300">154:49</span>
+                <span className="text-xs c text-(--token-functions) select-none">
+                  154:49
+                </span>
               </div>
             </div>
 
@@ -206,7 +209,7 @@ function App() {
                     />
                   </svg>
                 </div>
-                <span className="text-xs">0 Errors</span>
+                <span className="text-xs select-none">0 Errors</span>
               </div>
               <div className="nice">
                 <div className="c text-yellow-400">
@@ -222,7 +225,7 @@ function App() {
                     />
                   </svg>
                 </div>
-                <span className="text-xs">1 Warning</span>
+                <span className="text-xs select-none">1 Warning</span>
               </div>
             </div>
           </div>
