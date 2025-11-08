@@ -55,19 +55,17 @@ type FileBuffer = {
   removeLine(n: number): void;
   length(): number;
 };
+
 function createFileBuffer(initial: string[]): FileBuffer {
   return {
     lines: initial,
     getLine(n) {
-      if (n < 0 || n >= this.lines.length) return "";
-      return this.lines[n];
+      if (n < 0) return "";
+      const val = this.lines[n];
+      return typeof val === "string" ? val : "";
     },
     setLine(n, content) {
       if (n < 0) return;
-      if (n >= this.lines.length) {
-        const missing = n - this.lines.length + 1;
-        for (let i = 0; i < missing; i++) this.lines.push("");
-      }
       this.lines[n] = content;
     },
     insertLine(n, content) {
@@ -84,6 +82,7 @@ function createFileBuffer(initial: string[]): FileBuffer {
     },
   };
 }
+
 function tokenColor(type: string) {
   const lowered = type.toLowerCase();
   switch (lowered) {
@@ -208,12 +207,23 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const lastKeydownRef = useRef<{ key: string; ts: number } | null>(null);
   const suppressNextClickRef = useRef(false);
   const dragAnchorRef = useRef<{ row: number; col: number } | null>(null);
+  const renderCacheRef = useRef<
+    Map<number, { version: number; node: JSX.Element }>
+  >(new Map());
+  const pendingScrollTopRef = useRef(0);
+  const scrollRafRef = useRef<number | null>(null);
+  // Tokenization request batching / debouncing
+  const tokenRequestDebounceRef = useRef<number | null>(null);
+  const tokenReqPendingRef = useRef<{ start: number; end: number } | null>(
+    null,
+  );
   const [lineHeightPx, setLineHeightPx] = useState(18);
   const [charWidthPx, setCharWidthPx] = useState(8);
   const [viewportHeight, setViewportHeight] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const [buffer] = useState<FileBuffer>(() => createFileBuffer([]));
   const [loadedUpto, setLoadedUpto] = useState(0);
+
   // Tokenization pool: for each line we keep { version, tokens }
   const [tokenPool, setTokenPool] = useState<
     Map<number, { version: number; tokens: Token[] }>
@@ -222,6 +232,10 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     () => new Map(),
   );
   const pendingTokenizationRef = useRef<null>(null);
+  const lineVersionsRef = useRef<Map<number, number>>(new Map());
+  useEffect(() => {
+    lineVersionsRef.current = lineVersions;
+  }, [lineVersions]);
   const [fileLineCount, setFileLineCount] = useState<number>(() =>
     Math.max(1, (fileHandle.metadata as any).lineCount ?? 1),
   );
@@ -543,7 +557,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           m.set(line - removedCount, v);
         }
       });
-      m.set(sRow, (m.get(sRow) ?? 0) + 1); 
+      m.set(sRow, (m.get(sRow) ?? 0) + 1);
       return m;
     });
     setSel(null);
@@ -553,7 +567,9 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     const digits = String(Math.max(fileLineCount, 1)).length;
     return Math.max(32, Math.ceil(charWidthPx * digits) + 12 + 8);
   }, [charWidthPx, fileLineCount]);
-  const overscan = 10;
+  const overscan = 3;
+  const TOKEN_CONTEXT_BEFORE = 5;
+  const TOKEN_CONTEXT_AFTER = 5;
   const totalHeight = useMemo(
     () => fileLineCount * lineHeightPx,
     [fileLineCount, lineHeightPx],
@@ -584,16 +600,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       }
       setLoadedUpto(end);
       log("Loaded lines 0-" + end);
-      fileHandle.requestTokenization(start, end);
     },
-    [
-      loadedUpto,
-      buffer,
-      fileHandle,
-      fileLineCount,
-      firstVisibleLine,
-      lastVisibleLine,
-    ],
+    [loadedUpto, buffer, fileHandle, fileLineCount],
   );
   useEffect(() => {
     const off = (e: any) => {
@@ -626,17 +634,21 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     });
     fileHandle.recieveTokenization((newTokens) => {
       const grouped = new Map<number, Token[]>();
+      const invalidated = new Set<number>();
       newTokens.forEach((t) => {
         const ln = t.startOffset.row;
+        invalidated.add(ln);
         const arr = grouped.get(ln) || [];
         arr.push(t);
         grouped.set(ln, arr);
       });
+      
+      invalidated.forEach((ln) => renderCacheRef.current.delete(ln));
       setTokenPool((prev) => {
         const next = new Map(prev);
         grouped.forEach((arr, ln) => {
           next.set(ln, {
-            version: lineVersions.get(ln) ?? 0,
+            version: lineVersionsRef.current.get(ln) ?? 0,
             tokens: arr,
           });
         });
@@ -685,6 +697,9 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     }
   }, [fileHandle.metadata.language]);
   useEffect(() => {
+    renderCacheRef.current.clear();
+  }, [lineHeightPx, charWidthPx, fileHandle.metadata.language]);
+  useEffect(() => {
     ensureLinesLoaded(lastVisibleLine);
     if (
       undoStackRef.current.length === 0 &&
@@ -706,20 +721,62 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     return lines;
   }, [firstVisibleLine, lastVisibleLine, fileLineCount]);
   useEffect(() => {
-    const need: number[] = [];
+    const needLines: number[] = [];
     visibleLines.forEach((ln) => {
       const version = lineVersions.get(ln) ?? 0;
       const entry = tokenPool.get(ln);
       if (!entry || entry.version < version) {
-        need.push(ln);
+        needLines.push(ln);
       }
     });
-    if (need.length) {
-      const start = Math.min(...need);
-      const end = Math.max(...need);
-      fileHandle.requestTokenization(start, end);
+    if (needLines.length === 0) return;
+
+    needLines.sort((a, b) => a - b);
+    const ranges: Array<{ start: number; end: number }> = [];
+    let rs = needLines[0];
+    let re = needLines[0];
+    for (let i = 1; i < needLines.length; i++) {
+      const ln = needLines[i];
+      if (ln === re + 1) {
+        re = ln;
+      } else {
+        ranges.push({ start: rs, end: re });
+        rs = re = ln;
+      }
     }
-  }, [visibleLines, tokenPool, lineVersions, fileHandle]);
+    ranges.push({ start: rs, end: re });
+
+    ranges.forEach((r) => {
+      if (!tokenReqPendingRef.current) {
+        tokenReqPendingRef.current = { start: r.start, end: r.end };
+      } else {
+        tokenReqPendingRef.current.start = Math.min(
+          tokenReqPendingRef.current.start,
+          r.start,
+        );
+        tokenReqPendingRef.current.end = Math.max(
+          tokenReqPendingRef.current.end,
+          r.end,
+        );
+      }
+    });
+
+    if (tokenRequestDebounceRef.current) {
+      clearTimeout(tokenRequestDebounceRef.current);
+    }
+    tokenRequestDebounceRef.current = window.setTimeout(() => {
+      const pending = tokenReqPendingRef.current;
+      tokenRequestDebounceRef.current = null;
+      if (!pending) return;
+      const expandedStart = Math.max(0, pending.start - TOKEN_CONTEXT_BEFORE);
+      const expandedEnd = Math.min(
+        fileLineCount - 1,
+        pending.end + TOKEN_CONTEXT_AFTER,
+      );
+      fileHandle.requestTokenization(expandedStart, expandedEnd);
+      tokenReqPendingRef.current = null;
+    }, 60); 
+  }, [visibleLines, tokenPool, lineVersions, fileHandle, fileLineCount]);
   const moveCaret = useCallback(
     (row: number, col: number) => {
       row = Math.max(0, Math.min(row, Math.max(0, fileLineCount - 1)));
@@ -1432,9 +1489,17 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           0,
           Math.min(maxScroll, container.scrollTop + delta),
         );
+
         if (next !== container.scrollTop) {
           container.scrollTop = next;
-          setScrollTop(next);
+
+          pendingScrollTopRef.current = next;
+          if (scrollRafRef.current == null) {
+            scrollRafRef.current = requestAnimationFrame(() => {
+              scrollRafRef.current = null;
+              setScrollTop(pendingScrollTopRef.current);
+            });
+          }
         }
       }
       const y = e.clientY - rect.top + container.scrollTop;
@@ -1481,10 +1546,22 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   }, [cursor, lineHeightPx, charWidthPx, gutterPx, scrollTop]);
   const renderLineTokens = useCallback(
     (lineNumber: number) => {
+      const version = lineVersions.get(lineNumber) ?? 0;
+
       const content = buffer.getLine(lineNumber);
+
       const tokens = tokenPool.get(lineNumber)?.tokens;
+
+      const cached = renderCacheRef.current.get(lineNumber);
+
+      if (cached && cached.version === version) return cached.node;
+
+      const setCacheAndReturn = (n: JSX.Element) => {
+        renderCacheRef.current.set(lineNumber, { version, node: n });
+        return n;
+      };
       if (!tokens || tokens.length === 0) {
-        return (
+        return setCacheAndReturn(
           <div
             data-line={lineNumber}
             className="flex"
@@ -1498,13 +1575,39 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
             >
               {content || " "}
             </span>
-          </div>
+          </div>,
         );
       }
-      const sorted = [...tokens].sort(
-        (a, b) => a.startOffset.col - b.startOffset.col,
-      );
+
+      const MAX_TOKENS_PER_LINE = 800;
+      const MAX_COLUMNS_PER_LINE_FOR_TOKENIZED_RENDER = 2000;
+      if (
+        content.length > MAX_COLUMNS_PER_LINE_FOR_TOKENIZED_RENDER ||
+        tokens.length > MAX_TOKENS_PER_LINE
+      ) {
+        return setCacheAndReturn(
+          <div
+            data-line={lineNumber}
+            className="flex"
+            style={{ height: lineHeightPx }}
+          >
+            <span
+              style={{
+                color: tokenColor("untokenized"),
+                whiteSpace: "pre",
+              }}
+            >
+              {content || " "}
+            </span>
+          </div>,
+        );
+      }
+      const sorted = [...tokens]
+        .sort((a, b) => a.startOffset.col - b.startOffset.col)
+        .slice(0, MAX_TOKENS_PER_LINE);
+
       const spans: React.ReactNode[] = [];
+
       let lastCol = 0;
       sorted.forEach((t, i) => {
         if (t.startOffset.row !== lineNumber) return;
@@ -1567,17 +1670,17 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           </span>,
         );
       }
-      return (
+      return setCacheAndReturn(
         <div
           data-line={lineNumber}
           className="flex"
           style={{ height: lineHeightPx }}
         >
           {spans}
-        </div>
+        </div>,
       );
     },
-    [tokenPool, buffer, lineHeightPx],
+    [tokenPool, buffer, lineHeightPx, lineVersions],
   );
   return (
     <div
@@ -1596,7 +1699,15 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         className="absolute inset-0 overflow-auto"
         onScroll={(e) => {
           setContextMenu(null);
-          setScrollTop((e.target as HTMLDivElement).scrollTop);
+
+          const st = (e.target as HTMLDivElement).scrollTop;
+          pendingScrollTopRef.current = st;
+          if (scrollRafRef.current == null) {
+            scrollRafRef.current = requestAnimationFrame(() => {
+              scrollRafRef.current = null;
+              setScrollTop(pendingScrollTopRef.current);
+            });
+          }
         }}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -1619,7 +1730,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           <div
             style={{
               position: "absolute",
-              top: firstVisibleLine * lineHeightPx,
+              transform: `translateY(${firstVisibleLine * lineHeightPx}px)`,
+              willChange: "transform",
               left: 0,
               right: 0,
             }}
@@ -1815,7 +1927,14 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
               ? { row: eRow, col: eCol }
               : { row: sRow, col: sCol };
           const rects: JSX.Element[] = [];
-          for (let r = startFirst.row; r <= endLast.row; r++) {
+          const visStart = firstVisibleLine;
+          const visEnd = Math.min(
+            fileLineCount - 1,
+            firstVisibleLine + visibleLineCount + overscan,
+          );
+          const fromR = Math.max(startFirst.row, visStart);
+          const toR = Math.min(endLast.row, visEnd);
+          for (let r = fromR; r <= toR; r++) {
             const fromCol = r === startFirst.row ? startFirst.col : 0;
             const toCol =
               r === endLast.row ? endLast.col : buffer.getLine(r).length;
