@@ -8,6 +8,7 @@ import {
 } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { createTauriFileHandle } from "./editor";
+import { getIconSvg } from "./icon";
 
 const MenuContext = createContext<{
   openTab: string | null;
@@ -141,12 +142,33 @@ function App() {
   const appWindow = getCurrentWindow();
 
   const [windowTitle, setWindowTitle] = useState("");
+
   const [fileHandle, setFileHandle] = useState<any>(null);
   const [openTab, setOpenTab] = useState<string | null>(null);
+
+  const [folderRoot, setFolderRoot] = useState<string | null>(null);
+  const [dirTree, setDirTree] = useState<any | null>(null);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [openFiles, setOpenFiles] = useState<{ path: string; name: string }[]>(
+    [],
+  );
 
   const lastOpenFileRef = useRef(0);
 
   const lastNewFileRef = useRef(0);
+  const openingRef = useRef(false);
+  useEffect(() => {
+    if (!fileHandle) return;
+    try {
+      setOpenFiles((prev) => {
+        const p = (fileHandle as any)?.metadata?.path;
+        const n = (fileHandle as any)?.metadata?.name;
+        if (!p || !n) return prev;
+        if (prev.some((f) => f.path === p)) return prev;
+        return [{ path: p, name: n }, ...prev].slice(0, 50);
+      });
+    } catch {}
+  }, [fileHandle]);
 
   const menuCloseTimerRef = useRef<NodeJS.Timeout | null>(null);
   const handleMenuMouseEnter = () => {
@@ -162,18 +184,106 @@ function App() {
     }, 250);
   };
 
+  const addOpenFile = (path: string, name: string) => {
+    setOpenFiles((prev) => {
+      if (prev.some((f) => f.path === path)) return prev;
+      return [{ path, name }, ...prev].slice(0, 50);
+    });
+  };
+
+  const openFilePath = async (path: string) => {
+    if (openingRef.current) return;
+    openingRef.current = true;
+    try {
+      const fh = await createTauriFileHandle(path);
+      setFileHandle(fh);
+      setWindowTitle(fh.metadata.name);
+      (window as any).__loadTotalLines = (fh.metadata as any)?.lineCount;
+      addOpenFile(path, fh.metadata.name);
+    } finally {
+      openingRef.current = false;
+    }
+  };
+
+  const renderNode = (node: any) => {
+    const isDir = !!node.isDir;
+    const isExpanded = expanded[node.path] ?? node.path === folderRoot;
+    const gray = node.ignored ? "opacity-60" : "";
+    const row = (
+      <div
+        className={`flex items-center gap-1 px-1 py-0.5 rounded ${gray} hover:bg-(--background-color)`}
+      >
+        <span
+          className="w-4 h-4 inline-block c"
+          dangerouslySetInnerHTML={{ __html: getIconSvg(node.name, isDir) }}
+        />
+        <span className="truncate">{node.name}</span>
+      </div>
+    );
+    if (isDir) {
+      return (
+        <div key={node.path}>
+          <button
+            className="w-full text-left"
+            onClick={() =>
+              setExpanded((e) => ({ ...e, [node.path]: !isExpanded }))
+            }
+          >
+            {row}
+          </button>
+          {isExpanded &&
+          Array.isArray(node.children) &&
+          node.children.length > 0 ? (
+            <div className="pl-3">
+              {node.children.map((c: any) => renderNode(c))}
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+    return (
+      <button
+        key={node.path}
+        className="w-full text-left"
+        onClick={() => openFilePath(node.path)}
+      >
+        {row}
+      </button>
+    );
+  };
+
+  function injectChildren(
+    tree: any,
+    targetPath: string,
+    newChildren: any[],
+  ): any {
+    if (!tree) return tree;
+    if (tree.path === targetPath) {
+      return { ...tree, children: newChildren };
+    }
+    if (Array.isArray(tree.children)) {
+      return {
+        ...tree,
+        children: tree.children.map((c: any) =>
+          injectChildren(c, targetPath, newChildren),
+        ),
+      };
+    }
+    return tree;
+  }
+
   useEffect(() => {
     const onOpen = (_e?: Event) => {
       (async () => {
         const now = Date.now();
+
         if (now - lastOpenFileRef.current < MIN_INTERVAL_MS) return;
+
         lastOpenFileRef.current = now;
+
         const path = await openDialog({ multiple: false, directory: false });
         if (typeof path === "string") {
-          const fh = await createTauriFileHandle(path);
-          setFileHandle(fh);
-          setWindowTitle(fh.metadata.name);
-          (window as any).__loadTotalLines = (fh.metadata as any)?.lineCount;
+          await openFilePath(path);
         }
       })();
     };
@@ -183,20 +293,22 @@ function App() {
         if (now - lastNewFileRef.current < MIN_INTERVAL_MS) return;
         lastNewFileRef.current = now;
         const path = await saveDialog({ title: "Create New File" });
+
         if (path) {
           await invoke("create_empty_file", { path });
-          const fh = await createTauriFileHandle(path as string);
-          setFileHandle(fh);
-          setWindowTitle(fh.metadata.name);
-          (window as any).__loadTotalLines = (fh.metadata as any)?.lineCount;
+
+          await openFilePath(path as string);
         }
       })();
     };
 
     window.addEventListener("load:open-file", onOpen as EventListener);
+
     window.addEventListener("load:new-file", onNew as EventListener);
+
     return () => {
       window.removeEventListener("load:open-file", onOpen as EventListener);
+
       window.removeEventListener("load:new-file", onNew as EventListener);
     };
   }, []);
@@ -242,23 +354,55 @@ function App() {
               name="File"
               options={[
                 {
-                  text: "Open File...",
-
+                  text: "Open Folder...",
                   onClick: async () => {
                     const now = Date.now();
+
                     if (now - lastOpenFileRef.current < MIN_INTERVAL_MS) return;
+
                     lastOpenFileRef.current = now;
+
+                    const path = await openDialog({
+                      multiple: false,
+                      directory: true,
+                    });
+                    if (typeof path === "string") {
+                      const tree = await invoke("read_directory_root", {
+                        path,
+                      });
+                      setDirTree(tree as any);
+                      setFolderRoot(path as string);
+                      setExpanded((e) => ({ ...e, [path as string]: true }));
+                    }
+                  },
+                },
+                ...(folderRoot
+                  ? [
+                      {
+                        text: "Close Folder",
+                        onClick: () => {
+                          setFolderRoot(null);
+                          setDirTree(null);
+                          setExpanded({});
+                        },
+                      },
+                    ]
+                  : []),
+                {
+                  text: "Open File...",
+                  onClick: async () => {
+                    const now = Date.now();
+
+                    if (now - lastOpenFileRef.current < MIN_INTERVAL_MS) return;
+
+                    lastOpenFileRef.current = now;
+
                     const path = await openDialog({
                       multiple: false,
                       directory: false,
                     });
-
                     if (typeof path === "string") {
-                      const fh = await createTauriFileHandle(path);
-
-                      setFileHandle(fh);
-
-                      setWindowTitle(fh.metadata.name);
+                      await openFilePath(path);
                     }
                   },
                   keybindSuggestion: "Ctrl+O",
@@ -266,21 +410,14 @@ function App() {
 
                 {
                   text: "New File...",
-
                   onClick: async () => {
                     const now = Date.now();
                     if (now - lastNewFileRef.current < MIN_INTERVAL_MS) return;
                     lastNewFileRef.current = now;
                     const path = await saveDialog({ title: "Create New File" });
-
                     if (path) {
                       await invoke("create_empty_file", { path });
-
-                      const fh = await createTauriFileHandle(path as string);
-
-                      setFileHandle(fh);
-
-                      setWindowTitle(fh.metadata.name);
+                      await openFilePath(path as string);
                     }
                   },
                   keybindSuggestion: "Ctrl+N",
@@ -323,7 +460,191 @@ function App() {
         </div>
         <div className="flex-1 flex w-full border-t border-(--token-functions)">
           <div className="w-xs max-w-[18rem] shrink-0 bg-(--background-secondary-color) flex flex-col justify-between border-r border-(--token-functions)">
-            <div></div>
+            <div>
+              {folderRoot ? (
+                <div className="p-1">
+                  {(() => {
+                    const renderTree = (root: any) => {
+                      const Node = (node: any) => {
+                        if (
+                          node?.isDir &&
+                          typeof node.name === "string" &&
+                          node.name.startsWith(".")
+                        ) {
+                          return null;
+                        }
+                        const isDir = !!node.isDir;
+                        const isExpanded =
+                          expanded[node.path] ?? node.path === folderRoot;
+                        const gray = node.ignored ? "opacity-60" : "";
+                        const isActive =
+                          !isDir &&
+                          (fileHandle as any)?.metadata?.path === node.path;
+
+                        const onClick = async () => {
+                          if (isDir) {
+                            const next = !isExpanded;
+                            setExpanded((e) => ({ ...e, [node.path]: next }));
+                            if (next && node.children == null) {
+                              try {
+                                const children = await invoke(
+                                  "read_directory_children",
+                                  {
+                                    path: node.path,
+                                    root: folderRoot as string,
+                                  },
+                                );
+                                setDirTree((prev: any) =>
+                                  injectChildren(
+                                    prev,
+                                    node.path,
+                                    children as any,
+                                  ),
+                                );
+                              } catch {}
+                            }
+                          } else {
+                            const fh = await createTauriFileHandle(node.path);
+                            setFileHandle(fh);
+                            setWindowTitle(fh.metadata.name);
+                            (window as any).__loadTotalLines = (
+                              fh.metadata as any
+                            )?.lineCount;
+                          }
+                        };
+
+                        return (
+                          <div key={node.path}>
+                            <button
+                              className="w-full text-left"
+                              type="button"
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                onClick();
+                              }}
+                            >
+                              <div
+                                className={`flex items-center gap-1 px-1 py-0.5 rounded ${gray} ${!isDir && (fileHandle as any)?.metadata?.path === node.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
+                              >
+                                <span
+                                  className="w-4 h-4 inline-block c"
+                                  dangerouslySetInnerHTML={{
+                                    __html: getIconSvg(node.name || "", isDir),
+                                  }}
+                                />
+                                <span className="truncate">{node.name}</span>
+                              </div>
+                            </button>
+                            {isDir &&
+                            isExpanded &&
+                            Array.isArray(node.children) &&
+                            node.children.length > 0 ? (
+                              <div className="pl-3">
+                                {node.children.map((c: any) => (
+                                  <Node key={c.path} {...c} />
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      };
+                      return <Node {...root} />;
+                    };
+
+                    const normalize = (s: string) =>
+                      s.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+                    const outside = openFiles.filter((f) => {
+                      const np = f.path.replace(/\\/g, "/").toLowerCase();
+                      const nr = normalize(folderRoot as string) + "/";
+                      return !np.startsWith(nr);
+                    });
+
+                    return (
+                      <div className="flex flex-col gap-1">
+                        {outside.length > 0 ? (
+                          <div className="mb-1">
+                            <div className="px-1 py-0.5 text-xs uppercase tracking-wide text-(--token-comments)">
+                              Open Outside
+                            </div>
+                            {outside.map((f) => (
+                              <button
+                                key={f.path}
+                                className="w-full text-left"
+                                onClick={async () => {
+                                  const fh = await createTauriFileHandle(
+                                    f.path,
+                                  );
+                                  setFileHandle(fh);
+                                  setWindowTitle(fh.metadata.name);
+                                  (window as any).__loadTotalLines = (
+                                    fh.metadata as any
+                                  )?.lineCount;
+                                }}
+                              >
+                                <div
+                                  className={`flex items-center gap-1 px-1 py-0.5 rounded ${fileHandle?.metadata?.path === f.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
+                                >
+                                  <span
+                                    className="w-4 h-4 inline-block c"
+                                    dangerouslySetInnerHTML={{
+                                      __html: getIconSvg(f.name, false),
+                                    }}
+                                  />
+                                  <span className="truncate">{f.name}</span>
+                                </div>
+                              </button>
+                            ))}
+                            <div className="h-px bg-(--token-functions) my-1 opacity-30" />
+                          </div>
+                        ) : null}
+
+                        {dirTree ? renderTree(dirTree) : null}
+                      </div>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <div className="p-1">
+                  <div>
+                    <div className="px-1 py-0.5 text-xs uppercase tracking-wide text-(--token-comments)">
+                      Open Files
+                    </div>
+                    {openFiles.length > 0 ? (
+                      openFiles.map((f) => (
+                        <button
+                          key={f.path}
+                          className="w-full text-left"
+                          onClick={async () => {
+                            const fh = await createTauriFileHandle(f.path);
+                            setFileHandle(fh);
+                            setWindowTitle(fh.metadata.name);
+                            (window as any).__loadTotalLines = (
+                              fh.metadata as any
+                            )?.lineCount;
+                          }}
+                        >
+                          <div
+                            className={`flex items-center gap-1 px-1 py-0.5 rounded ${fileHandle?.metadata?.path === f.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
+                          >
+                            <span
+                              className="w-4 h-4 inline-block c"
+                              dangerouslySetInnerHTML={{
+                                __html: getIconSvg(f.name, false),
+                              }}
+                            />
+                            <span className="truncate">{f.name}</span>
+                          </div>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="px-1 py-0.5 text-(--token-comments) text-sm">
+                        No files open
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="p-1 border-t border-(--token-functions) flex items-center justify-between">
               <div className="flex items-center gap-0.5">
                 <div className="nice">
@@ -332,11 +653,15 @@ function App() {
                 <div className="nice">
                   <span className="text-xs c text-(--token-functions) select-none">
                     {(() => {
-                      const [cursor, setCursor] = useState((window as any).__loadCursor || { row: 1, col: 1 });
+                      const [cursor, setCursor] = useState(
+                        (window as any).__loadCursor || { row: 1, col: 1 },
+                      );
 
                       useEffect(() => {
                         const interval = setInterval(() => {
-                          setCursor((window as any).__loadCursor || { row: 1, col: 1 });
+                          setCursor(
+                            (window as any).__loadCursor || { row: 1, col: 1 },
+                          );
                         }, 100);
 
                         return () => clearInterval(interval);
@@ -390,7 +715,12 @@ function App() {
             </div>
           </div>
           <div className="flex-1">
-            {fileHandle ? <Editor fileHandle={fileHandle} /> : null}
+            {fileHandle ? (
+              <Editor
+                key={(fileHandle as any)?.metadata?.path}
+                fileHandle={fileHandle}
+              />
+            ) : null}
           </div>
         </div>
       </div>

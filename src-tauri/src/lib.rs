@@ -1,11 +1,12 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 mod pools;
 mod task;
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::Serialize;
 
 use tauri::{AppHandle, Emitter, State};
@@ -199,16 +200,13 @@ fn insert_line(
 ) -> Result<(), String> {
     let mut guard = state.0.lock().unwrap();
     if let Some(file) = guard.as_mut() {
-        // Clamp insertion index
         let idx = if num > file.lines.len() {
             file.lines.len()
         } else {
             num
         };
         if idx >= file.lines.len() {
-            // Append (may have gaps -> fill with empty lines)
             if idx > file.lines.len() {
-                // Fill gaps with empty lines
                 while file.lines.len() < idx {
                     file.lines.push(String::new());
                 }
@@ -218,11 +216,9 @@ fn insert_line(
             file.lines.insert(idx, content.clone());
         }
 
-        // Recompute size (sum of lengths + newline chars)
         file.size =
             file.lines.iter().map(|l| l.len()).sum::<usize>() + file.lines.len().saturating_sub(1);
 
-        // Emit update for the inserted line including total line count so frontend can shift its pools.
         app.emit(
             "file-updated",
             serde_json::json!({
@@ -245,13 +241,12 @@ fn remove_line(app: AppHandle, state: State<'_, EditorState>, num: usize) -> Res
     let mut guard = state.0.lock().unwrap();
     if let Some(file) = guard.as_mut() {
         if num >= file.lines.len() {
-            return Ok(()); // nothing to remove
+            return Ok(());
         }
         file.lines.remove(num);
         file.size =
             file.lines.iter().map(|l| l.len()).sum::<usize>() + file.lines.len().saturating_sub(1);
 
-        // Emit an update for the removed line index (now occupied by the following line, or empty)
         app.emit(
             "file-updated",
             serde_json::json!({
@@ -376,6 +371,155 @@ fn close_file(state: State<'_, EditorState>) -> Result<(), String> {
     let mut guard = state.0.lock().unwrap();
     *guard = None;
     Ok(())
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirEntryItem {
+    name: String,
+    path: String,
+    isDir: bool,
+    ignored: bool,
+    children: Option<Vec<DirEntryItem>>,
+}
+
+fn is_dot_folder(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+fn build_gitignore(root: &Path) -> Option<Gitignore> {
+    let mut builder = GitignoreBuilder::new(root);
+
+    let gi_path = root.join(".gitignore");
+    if gi_path.exists() {
+        let _ = builder.add(gi_path);
+    }
+
+    // Respect repository local excludes if present
+    let info_exclude = root.join(".git").join("info").join("exclude");
+    if info_exclude.exists() {
+        let _ = builder.add(info_exclude);
+    }
+
+    match builder.build() {
+        Ok(m) => Some(m),
+        Err(_) => None,
+    }
+}
+
+fn is_ignored_path(m: Option<&Gitignore>, root: &Path, path: &Path, is_dir: bool) -> bool {
+    if let Some(matcher) = m {
+        if let Ok(rel) = path.strip_prefix(root) {
+            let matched = matcher.matched(rel, is_dir);
+            return matched.is_ignore();
+        }
+        let matched = matcher.matched(path, is_dir);
+        return matched.is_ignore();
+    }
+    false
+}
+
+fn build_dir_entry(
+    path: &Path,
+    root: &Path,
+    matcher: Option<&Gitignore>,
+) -> Result<DirEntryItem, String> {
+    let is_dir = path.is_dir();
+
+    let name = {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| path.display().to_string())
+    };
+
+    let ignored = is_ignored_path(matcher, root, path, is_dir);
+
+    Ok(DirEntryItem {
+        name,
+        path: path.to_string_lossy().to_string(),
+        isDir: is_dir,
+        ignored,
+        children: None,
+    })
+}
+
+fn list_dir_children(
+    dir: &Path,
+    root: &Path,
+    matcher: Option<&Gitignore>,
+) -> Result<Vec<DirEntryItem>, String> {
+    let mut children: Vec<DirEntryItem> = Vec::new();
+
+    let rd = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in rd {
+        let entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue, // best-effort: skip unreadable entries
+        };
+
+        let child_path = entry.path();
+        let ft = match entry.file_type() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let child_name = entry.file_name().to_string_lossy().to_string();
+
+        // Hide any folder that starts with a '.'
+        if ft.is_dir() && is_dot_folder(&child_name) {
+            continue;
+        }
+
+        match build_dir_entry(&child_path, root, matcher) {
+            Ok(child) => children.push(child),
+            Err(_) => continue,
+        }
+    }
+
+    // Sort dirs first, then files; both alphabetically (case-insensitive)
+    children.sort_by(|a, b| {
+        if a.isDir != b.isDir {
+            b.isDir.cmp(&a.isDir)
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+
+    Ok(children)
+}
+
+#[tauri::command]
+fn read_directory_root(path: String) -> Result<DirEntryItem, String> {
+    let root = PathBuf::from(&path);
+    if !root.exists() {
+        return Err("path does not exist".into());
+    }
+    if !root.is_dir() {
+        return Err("path is not a directory".into());
+    }
+    let matcher = build_gitignore(&root);
+
+    let mut node = build_dir_entry(&root, &root, matcher.as_ref())?;
+    // Shallow children only
+    let children = list_dir_children(&root, &root, matcher.as_ref())?;
+    node.children = Some(children);
+    Ok(node)
+}
+
+#[tauri::command]
+fn read_directory_children(path: String, root: String) -> Result<Vec<DirEntryItem>, String> {
+    let dir = PathBuf::from(&path);
+    if !dir.exists() {
+        return Err("path does not exist".into());
+    }
+    if !dir.is_dir() {
+        return Err("path is not a directory".into());
+    }
+
+    let root_pb = PathBuf::from(&root);
+    let matcher = build_gitignore(&root_pb);
+
+    list_dir_children(&dir, &root_pb, matcher.as_ref())
 }
 
 fn detect_language_from_extension(path: &PathBuf) -> String {
@@ -514,6 +658,8 @@ pub fn run() {
             ready,
             open_file,
             create_empty_file,
+            read_directory_root,
+            read_directory_children,
             read_line,
             write_line,
             insert_line,
