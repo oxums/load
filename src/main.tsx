@@ -1,10 +1,11 @@
-import React, { useEffect } from "react";
+import React, { KeyboardEvent, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./global.css";
 import Loading from "./Loading";
 import { setCSSvar } from "./utils";
 import { getSettings } from "./settings";
+import { globalKeybinds } from "./keybinds";
 
 async function applyTheme() {
   const settings = await getSettings();
@@ -50,15 +51,29 @@ function AppLoader() {
     setCSSvar("--text-color", "white");
   });
 
-  const tasks = [
-    getSettings,
-    applyTheme,
-  ];
+  const tasks = [getSettings, applyTheme];
 
   useEffect(() => {
     Promise.all(tasks.map((task) => task())).then(() => {
       setIsLoaded(true);
     });
+  });
+
+  useEffect(() => {
+    function handleGlobalKeybinds(e: any) {
+      const key = `${e.ctrlKey ? "CTRL+" : ""}${e.shiftKey ? "SHIFT+" : ""}${e.altKey ? "ALT+" : ""}${e.key.toUpperCase()}`;
+      // @ts-ignore
+      if (globalKeybinds[key]) {
+        e.preventDefault();
+        // @ts-ignore
+        globalKeybinds[key]();
+      }
+    }
+
+    window.addEventListener("keydown", handleGlobalKeybinds);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeybinds);
+    };
   });
 
   return <>{isLoaded ? <App /> : <Loading />}</>;

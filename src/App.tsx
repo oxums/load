@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { X } from "lucide-react";
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 
 function FluentMinimize24Regular() {
@@ -68,7 +68,7 @@ function WindowUpperMenuTab({
       }}
     >
       <button
-        className="flex items-center gap-2 px-1.5 py-0.1 m-1 rounded-md hover:bg-(--background-color) select-none text-sm"
+        className="flex items-center gap-2 px-1.5 py-0.1 m-1 rounded hover:bg-(--background-color) select-none text-sm"
         onClick={() => setOpen((v) => !v)}
         onMouseDown={(e) => e.stopPropagation()}
         aria-expanded={open}
