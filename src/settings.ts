@@ -10,7 +10,7 @@ const defaultValues = {
     text: "#cdd6f4", // text
   },
   ui: {
-    "font-family": "Inter, system-ui, sans-serif",
+    "font-family": '"Zalando Sans", sans-serif',
     "font-size": "16px",
     "line-height": "1.5",
   },
@@ -35,6 +35,10 @@ const defaultValues = {
     debounceMs: 800,
     intervalMs: 0,
     onBlur: true,
+  },
+  wrap: {
+    enabled: true,
+    mode: "char",
   },
 };
 

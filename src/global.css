@@ -18,13 +18,62 @@ button {
     @apply flex items-center gap-1 cursor-pointer rounded hover:bg-(--background-color) px-1 py-0.5 transition-colors;
 }
 
-::-webkit-scrollbar {
+/* Nice custom scrollbars (only for .s containers) */
+.s::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.s::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 1px;
+}
+
+.s::-webkit-scrollbar-thumb {
+    background: var(--background-accent-color);
+    border-radius: 1px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+    transition: background-color 0.2s ease;
+}
+
+.s::-webkit-scrollbar-thumb:hover {
+    background: var(--token-functions);
+    background-clip: content-box;
+}
+
+.s::-webkit-scrollbar-thumb:active {
+    background: var(--text-color);
+    background-clip: content-box;
+}
+
+.s::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* Firefox */
+.scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--background-accent-color)
+        transparent;
+}
+
+/* Hide scrollbars globally except for .s */
+:not(.s) {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+:not(.s)::-webkit-scrollbar {
     display: none;
 }
 
-* {
+/* Utility to explicitly hide scrollbars when desired */
+.hide-scrollbar {
     -ms-overflow-style: none;
     scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+    display: none;
 }
 
 #root,

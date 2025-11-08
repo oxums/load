@@ -214,7 +214,7 @@ function App() {
         className={`flex items-center gap-1 px-1 py-0.5 rounded ${gray} hover:bg-(--background-color)`}
       >
         <span
-          className="w-4 h-4 inline-block c"
+          className="inline-block c icon-size"
           dangerouslySetInnerHTML={{ __html: getIconSvg(node.name, isDir) }}
         />
         <span className="truncate">{node.name}</span>
@@ -315,9 +315,10 @@ function App() {
 
   return (
     <MenuContext.Provider value={{ openTab, setOpenTab }}>
+      <style>{`.icon-size svg{width:16px;height:16px;display:block}`}</style>
       <div className="h-screen flex flex-col">
         <div
-          className="shrink-0 bg-(--background-secondary-color) flex justify-between items-center min-h-6 max-h-8"
+          className="shrink-0 bg-(--background-secondary-color) flex justify-between items-center min-h-8 max-h-8"
           onMouseDown={(e) => {
             if (e.buttons === 1) {
               e.detail === 2
@@ -426,8 +427,8 @@ function App() {
             />
           </div>
 
-          <div>
-            <span className="select-none text-xs c text-(--token-comments)">
+          <div className="flex-1 flex justify-center pointer-events-none">
+            <span className="select-none text-xs c text-(--token-comments) flex items-center">
               {windowTitle}
             </span>
           </div>
@@ -459,8 +460,8 @@ function App() {
           </div>
         </div>
         <div className="flex-1 flex w-full border-t border-(--token-functions)">
-          <div className="w-xs max-w-[18rem] shrink-0 bg-(--background-secondary-color) flex flex-col justify-between border-r border-(--token-functions)">
-            <div>
+          <div className="w-xs max-w-[18rem] shrink-0 bg-(--background-secondary-color) flex flex-col border-r border-(--token-functions) s h-[calc(100vh-32px)]">
+            <div className="flex-1 overflow-y-auto s scroll-thin">
               {folderRoot ? (
                 <div className="p-1">
                   {(() => {
@@ -527,7 +528,7 @@ function App() {
                                 className={`flex items-center gap-1 px-1 py-0.5 rounded ${gray} ${!isDir && (fileHandle as any)?.metadata?.path === node.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
                               >
                                 <span
-                                  className="w-4 h-4 inline-block c"
+                                  className="inline-block c icon-size"
                                   dangerouslySetInnerHTML={{
                                     __html: getIconSvg(node.name || "", isDir),
                                   }}
@@ -585,7 +586,7 @@ function App() {
                                   className={`flex items-center gap-1 px-1 py-0.5 rounded ${fileHandle?.metadata?.path === f.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
                                 >
                                   <span
-                                    className="w-4 h-4 inline-block c"
+                                    className="inline-block c icon-size"
                                     dangerouslySetInnerHTML={{
                                       __html: getIconSvg(f.name, false),
                                     }}
@@ -627,7 +628,7 @@ function App() {
                             className={`flex items-center gap-1 px-1 py-0.5 rounded ${fileHandle?.metadata?.path === f.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
                           >
                             <span
-                              className="w-4 h-4 inline-block c"
+                              className="inline-block c icon-size"
                               dangerouslySetInnerHTML={{
                                 __html: getIconSvg(f.name, false),
                               }}

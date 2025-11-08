@@ -208,7 +208,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const suppressNextClickRef = useRef(false);
   const dragAnchorRef = useRef<{ row: number; col: number } | null>(null);
   const renderCacheRef = useRef<
-    Map<number, { version: number; node: JSX.Element }>
+    Map<string, { version: number; node: JSX.Element }>
   >(new Map());
   const pendingScrollTopRef = useRef(0);
   const scrollRafRef = useRef<number | null>(null);
@@ -220,6 +220,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const [lineHeightPx, setLineHeightPx] = useState(18);
   const [charWidthPx, setCharWidthPx] = useState(8);
   const [viewportHeight, setViewportHeight] = useState(0);
+  const [viewportVersion, setViewportVersion] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const [buffer] = useState<FileBuffer>(() => createFileBuffer([]));
   const [loadedUpto, setLoadedUpto] = useState(0);
@@ -567,24 +568,218 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     const digits = String(Math.max(fileLineCount, 1)).length;
     return Math.max(32, Math.ceil(charWidthPx * digits) + 12 + 8);
   }, [charWidthPx, fileLineCount]);
+
   const overscan = 3;
   const TOKEN_CONTEXT_BEFORE = 5;
   const TOKEN_CONTEXT_AFTER = 5;
-  const totalHeight = useMemo(
-    () => fileLineCount * lineHeightPx,
-    [fileLineCount, lineHeightPx],
-  );
-  const firstVisibleLine = Math.max(
+  const LOAD_PREFETCH_BEFORE = 50;
+  const LOAD_PREFETCH_AFTER = 100;
+
+  const [wrapEnabled, setWrapEnabled] = useState(true);
+  const [wrapCols, setWrapCols] = useState(0);
+  const [wrapMode, setWrapMode] = useState<"char" | "word">("char");
+  const [lineSegments, setLineSegments] = useState<number[]>([]);
+  const [prefixSegments, setPrefixSegments] = useState<number[]>([]);
+  const [segmentStarts, setSegmentStarts] = useState<number[][]>([]);
+  useEffect(() => {
+    const w = (settings as any)?.wrap?.enabled;
+    const m = (settings as any)?.wrap?.mode;
+    if (typeof w === "boolean") setWrapEnabled(w);
+    if (m === "char" || m === "word") setWrapMode(m);
+  }, [settings]);
+
+
+  useLayoutEffect(() => {
+
+    if (!containerRef.current) return;
+
+
+    const computeWrap = () => {
+      const el = containerRef.current!;
+      const width = el.clientWidth;
+
+      const contentWidth = Math.max(0, width - gutterPx - 8);
+
+      const cols = Math.floor(contentWidth / (charWidthPx || 1));
+
+      setWrapCols(cols > 8 ? cols : 0);
+    };
+
+    // Initial compute
+    computeWrap();
+
+    // Observe container width changes
+    const el = containerRef.current;
+    const ro = new ResizeObserver(() => {
+      computeWrap();
+    });
+    ro.observe(el);
+
+    return () => {
+      ro.disconnect();
+    };
+  }, [charWidthPx, gutterPx, viewportHeight, viewportVersion]);
+
+  useEffect(() => {
+    if (!wrapEnabled || wrapCols <= 0) {
+      const segs = new Array(fileLineCount).fill(1);
+      const starts: number[][] = new Array(fileLineCount);
+      for (let i = 0; i < fileLineCount; i++) starts[i] = [0];
+      const prefix = new Array(fileLineCount + 1);
+      prefix[0] = 0;
+      for (let i = 0; i < fileLineCount; i++)
+        prefix[i + 1] = prefix[i] + segs[i];
+      setLineSegments(segs);
+      setSegmentStarts(starts);
+      setPrefixSegments(prefix);
+      return;
+    }
+    const segs: number[] = new Array(fileLineCount);
+    const starts: number[][] = new Array(fileLineCount);
+    for (let i = 0; i < fileLineCount; i++) {
+      const lineStr = buffer.getLine(i);
+      if (wrapMode === "word") {
+        const words = lineStr.match(/\S+\s*/g) || [];
+        let pos = 0;
+        let segLen = 0;
+        starts[i] = [0];
+        words.forEach((w) => {
+          const wLen = w.length;
+          // If adding this word exceeds wrapCols and current segment has content, start new segment
+          if (segLen > 0 && segLen + wLen > wrapCols) {
+            pos += segLen;
+            starts[i].push(pos);
+            segLen = wLen;
+          } else {
+            segLen += wLen;
+          }
+        });
+        // finalize segment count
+        segs[i] = starts[i].length;
+      } else {
+        const len = lineStr.length;
+        const count = Math.max(1, Math.ceil(len / wrapCols));
+        segs[i] = count;
+        starts[i] = [];
+        for (let s = 0; s < count; s++) starts[i].push(s * wrapCols);
+      }
+    }
+    // Ensure every line has at least one start
+    for (let i = 0; i < fileLineCount; i++) {
+      if (!starts[i] || starts[i].length === 0) {
+        starts[i] = [0];
+        segs[i] = 1;
+      } else {
+        segs[i] = starts[i].length;
+      }
+    }
+    const prefix: number[] = new Array(fileLineCount + 1);
+    prefix[0] = 0;
+    for (let i = 0; i < fileLineCount; i++) prefix[i + 1] = prefix[i] + segs[i];
+    setLineSegments(segs);
+    setSegmentStarts(starts);
+    setPrefixSegments(prefix);
+  }, [
+    wrapEnabled,
+    wrapCols,
+    wrapMode,
+    fileLineCount,
+    lineHeightPx,
+    charWidthPx,
+    lineVersions,
+    buffer,
+  ]);
+
+  const totalHeight = useMemo(() => {
+    const visualRows =
+      prefixSegments.length === fileLineCount + 1
+        ? prefixSegments[prefixSegments.length - 1]
+        : fileLineCount;
+    return visualRows * lineHeightPx;
+  }, [prefixSegments, fileLineCount, lineHeightPx]);
+
+  const firstVisibleSegment = Math.max(
     0,
     Math.floor(scrollTop / (lineHeightPx || 1)),
   );
-  const visibleLineCount = Math.ceil(
+  const visibleSegmentCount = Math.ceil(
     (viewportHeight || 1) / (lineHeightPx || 1),
   );
-  const lastVisibleLine = firstVisibleLine + visibleLineCount + overscan;
+  const lastVisibleSegment =
+    firstVisibleSegment + visibleSegmentCount + overscan;
+
+  const segmentToLine = useCallback(
+    (seg: number) => {
+      if (
+        !wrapEnabled ||
+        wrapCols <= 0 ||
+        prefixSegments.length !== fileLineCount + 1
+      ) {
+        return Math.min(fileLineCount - 1, seg);
+      }
+      // binary search over prefixSegments
+      let lo = 0;
+      let hi = fileLineCount - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const startSeg = prefixSegments[mid];
+        const endSeg = prefixSegments[mid + 1];
+        if (seg < startSeg) {
+          hi = mid - 1;
+        } else if (seg >= endSeg) {
+          lo = mid + 1;
+        } else {
+          return mid;
+        }
+      }
+      return Math.min(fileLineCount - 1, lo);
+    },
+    [wrapEnabled, wrapCols, prefixSegments, fileLineCount],
+  );
+
+  const firstVisibleLine = segmentToLine(firstVisibleSegment);
+  const lastVisibleLine = segmentToLine(lastVisibleSegment);
+
+  const visibleLines: number[] = useMemo(() => {
+    const lines: number[] = [];
+    if (
+      !wrapEnabled ||
+      wrapCols <= 0 ||
+      prefixSegments.length !== fileLineCount + 1
+    ) {
+      for (
+        let ln = firstVisibleLine;
+        ln <= Math.min(fileLineCount - 1, lastVisibleLine);
+        ln++
+      )
+        lines.push(ln);
+      return lines;
+    }
+
+    const endSeg = Math.min(
+      lastVisibleSegment,
+      prefixSegments[prefixSegments.length - 1] - 1,
+    );
+    for (let seg = firstVisibleSegment; seg <= endSeg; seg++) {
+      const ln = segmentToLine(seg);
+      if (lines.length === 0 || lines[lines.length - 1] !== ln) lines.push(ln);
+    }
+    return lines;
+  }, [
+    firstVisibleLine,
+    lastVisibleLine,
+    firstVisibleSegment,
+    lastVisibleSegment,
+    wrapEnabled,
+    wrapCols,
+    prefixSegments,
+    fileLineCount,
+    segmentToLine,
+  ]);
+
   const ensureLinesLoaded = useCallback(
-    (target: number) => {
-      const clamped = Math.min(target, Math.max(0, fileLineCount - 1));
+    (targetLine: number) => {
+      const clamped = Math.min(targetLine, Math.max(0, fileLineCount - 1));
       if (clamped <= loadedUpto) return;
       const start = loadedUpto;
       const end = clamped;
@@ -603,6 +798,40 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     },
     [loadedUpto, buffer, fileHandle, fileLineCount],
   );
+
+  const visibleSegments: number[] = useMemo(() => {
+    const segments: number[] = [];
+    if (
+      !wrapEnabled ||
+      wrapCols <= 0 ||
+      prefixSegments.length !== fileLineCount + 1
+    ) {
+      for (
+        let ln = firstVisibleLine;
+        ln <= Math.min(fileLineCount - 1, lastVisibleLine);
+        ln++
+      )
+        segments.push(ln);
+      return segments;
+    }
+    const maxSegment = prefixSegments[prefixSegments.length - 1] - 1;
+    for (
+      let seg = firstVisibleSegment;
+      seg <= Math.min(lastVisibleSegment, maxSegment);
+      seg++
+    )
+      segments.push(seg);
+    return segments;
+  }, [
+    firstVisibleLine,
+    lastVisibleLine,
+    firstVisibleSegment,
+    lastVisibleSegment,
+    wrapEnabled,
+    wrapCols,
+    prefixSegments,
+    fileLineCount,
+  ]);
   useEffect(() => {
     const off = (e: any) => {
       const { line, content, totalLines } = e;
@@ -642,8 +871,14 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         arr.push(t);
         grouped.set(ln, arr);
       });
-      
-      invalidated.forEach((ln) => renderCacheRef.current.delete(ln));
+
+      invalidated.forEach((ln) => {
+        for (const k of [...renderCacheRef.current.keys()]) {
+          if (k === String(ln) || k.startsWith(ln + ":")) {
+            renderCacheRef.current.delete(k);
+          }
+        }
+      });
       setTokenPool((prev) => {
         const next = new Map(prev);
         grouped.forEach((arr, ln) => {
@@ -698,9 +933,56 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   }, [fileHandle.metadata.language]);
   useEffect(() => {
     renderCacheRef.current.clear();
-  }, [lineHeightPx, charWidthPx, fileHandle.metadata.language]);
+  }, [
+    lineHeightPx,
+    charWidthPx,
+    fileHandle.metadata.language,
+    wrapCols,
+    prefixSegments,
+    wrapEnabled,
+  ]);
   useEffect(() => {
     ensureLinesLoaded(lastVisibleLine);
+
+    const prefetchStart = Math.max(0, firstVisibleLine - LOAD_PREFETCH_BEFORE);
+
+    const prefetchEnd = Math.min(
+      fileLineCount - 1,
+      lastVisibleLine + LOAD_PREFETCH_AFTER,
+    );
+    for (let i = prefetchStart; i <= prefetchEnd; i++) {
+      try {
+        fileHandle.readLine(i);
+      } catch {}
+    }
+
+    if (!tokenReqPendingRef.current) {
+      tokenReqPendingRef.current = { start: prefetchStart, end: prefetchEnd };
+    } else {
+      tokenReqPendingRef.current.start = Math.min(
+        tokenReqPendingRef.current.start,
+        prefetchStart,
+      );
+      tokenReqPendingRef.current.end = Math.max(
+        tokenReqPendingRef.current.end,
+        prefetchEnd,
+      );
+    }
+    if (!tokenRequestDebounceRef.current) {
+      tokenRequestDebounceRef.current = window.setTimeout(() => {
+        const pending = tokenReqPendingRef.current;
+        tokenRequestDebounceRef.current = null;
+        if (!pending) return;
+        const expandedStart = Math.max(0, pending.start - TOKEN_CONTEXT_BEFORE);
+        const expandedEnd = Math.min(
+          fileLineCount - 1,
+          pending.end + TOKEN_CONTEXT_AFTER,
+        );
+        fileHandle.requestTokenization(expandedStart, expandedEnd);
+        tokenReqPendingRef.current = null;
+      }, 16);
+    }
+
     if (
       undoStackRef.current.length === 0 &&
       loadedUpto >= Math.min(fileLineCount - 1, lastVisibleLine)
@@ -709,17 +991,14 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     }
   }, [
     lastVisibleLine,
+    firstVisibleLine,
     ensureLinesLoaded,
     loadedUpto,
     fileLineCount,
     takeSnapshot,
+    fileHandle,
   ]);
-  const visibleLines: number[] = useMemo(() => {
-    const lines: number[] = [];
-    const end = Math.min(fileLineCount - 1, lastVisibleLine);
-    for (let i = firstVisibleLine; i <= end; i++) lines.push(i);
-    return lines;
-  }, [firstVisibleLine, lastVisibleLine, fileLineCount]);
+
   useEffect(() => {
     const needLines: number[] = [];
     visibleLines.forEach((ln) => {
@@ -775,7 +1054,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       );
       fileHandle.requestTokenization(expandedStart, expandedEnd);
       tokenReqPendingRef.current = null;
-    }, 60); 
+    }, 60);
   }, [visibleLines, tokenPool, lineVersions, fileHandle, fileLineCount]);
   const moveCaret = useCallback(
     (row: number, col: number) => {
@@ -1025,6 +1304,9 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         }
         return;
       }
+
+            // Wrap toggles removed; controlled via settings
+
       if (e.key === "ArrowLeft") {
         e.preventDefault();
         if (!ctrl) clearExtraCursors();
@@ -1437,15 +1719,38 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       const rect = containerRef.current.getBoundingClientRect();
       const y = e.clientY - rect.top + scrollTop;
       const x = e.clientX - rect.left;
-      const row = Math.floor(y / lineHeightPx);
+      const seg = Math.floor(y / lineHeightPx);
       const xContent = Math.max(0, x - gutterPx);
-      const col = Math.floor(xContent / charWidthPx);
+      const colWithinSeg = Math.floor(xContent / charWidthPx);
+
+      let line = seg;
+      let startColOffset = 0;
+
+      const wrappedReady =
+        wrapEnabled &&
+        wrapCols > 0 &&
+        prefixSegments.length === fileLineCount + 1;
+
+      if (wrappedReady) {
+        line = segmentToLine(seg);
+        const segIndexWithinLine = seg - prefixSegments[line];
+        if (wrapMode === "word") {
+          const starts = segmentStarts[line] || [0];
+          startColOffset = starts[segIndexWithinLine] ?? 0;
+        } else {
+          startColOffset = segIndexWithinLine * wrapCols;
+        }
+      }
+
+      const lineStr = buffer.getLine(line);
+      const col = Math.min(lineStr.length, startColOffset + colWithinSeg);
+
       if (e.ctrlKey || e.metaKey) {
-        addCursor(row, col);
+        addCursor(line, col);
       } else {
         clearExtraCursors();
         setSel(null);
-        moveCaret(row, col);
+        moveCaret(line, col);
       }
       hiddenInputRef.current?.focus();
     },
@@ -1456,6 +1761,14 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       scrollTop,
       addCursor,
       clearExtraCursors,
+      wrapEnabled,
+      wrapCols,
+      prefixSegments,
+      segmentStarts,
+      wrapMode,
+      fileLineCount,
+      segmentToLine,
+      buffer,
     ],
   );
   useEffect(() => {
@@ -1538,32 +1851,73 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     };
   }, []);
   useLayoutEffect(() => {
-    if (caretRef.current) {
-      caretRef.current.style.top = cursor.row * lineHeightPx - scrollTop + "px";
-      caretRef.current.style.left = cursor.col * charWidthPx + gutterPx + "px";
-      caretRef.current.style.height = lineHeightPx + "px";
+    if (!caretRef.current) return;
+    let visualRow = cursor.row;
+    let visualCol = cursor.col;
+
+    const wrappedReady =
+      wrapEnabled &&
+      wrapCols > 0 &&
+      prefixSegments.length === fileLineCount + 1;
+
+    if (wrappedReady) {
+      if (wrapMode === "word") {
+        const starts = segmentStarts[cursor.row] || [0];
+        // find segment index whose start <= cursor.col
+        let segIndex = 0;
+        for (let i = 0; i < starts.length; i++) {
+          if (starts[i] <= cursor.col) segIndex = i;
+          else break;
+        }
+        const segStart = starts[segIndex] ?? 0;
+        visualRow = prefixSegments[cursor.row] + segIndex;
+        visualCol = cursor.col - segStart;
+      } else {
+        const segIndex = Math.floor(cursor.col / (wrapCols || 1));
+        visualRow = prefixSegments[cursor.row] + segIndex;
+        visualCol = cursor.col % (wrapCols || 1);
+      }
     }
-  }, [cursor, lineHeightPx, charWidthPx, gutterPx, scrollTop]);
+
+    caretRef.current.style.top = visualRow * lineHeightPx - scrollTop + "px";
+    caretRef.current.style.left = visualCol * charWidthPx + gutterPx + "px";
+    caretRef.current.style.height = lineHeightPx + "px";
+  }, [
+    cursor,
+    lineHeightPx,
+    charWidthPx,
+    gutterPx,
+    scrollTop,
+    wrapEnabled,
+    wrapCols,
+    prefixSegments,
+    fileLineCount,
+    wrapMode,
+    segmentStarts,
+  ]);
   const renderLineTokens = useCallback(
-    (lineNumber: number) => {
+    (lineNumber: number, startCol: number, endCol: number) => {
       const version = lineVersions.get(lineNumber) ?? 0;
 
-      const content = buffer.getLine(lineNumber);
+      const fullContent = buffer.getLine(lineNumber);
+      const segmentContent = fullContent.slice(startCol, endCol);
 
       const tokens = tokenPool.get(lineNumber)?.tokens;
 
-      const cached = renderCacheRef.current.get(lineNumber);
+      const cacheKey = lineNumber + ":" + startCol + ":" + endCol;
+      const cached = renderCacheRef.current.get(cacheKey);
 
       if (cached && cached.version === version) return cached.node;
 
       const setCacheAndReturn = (n: JSX.Element) => {
-        renderCacheRef.current.set(lineNumber, { version, node: n });
+        renderCacheRef.current.set(cacheKey, { version, node: n });
         return n;
       };
       if (!tokens || tokens.length === 0) {
         return setCacheAndReturn(
           <div
             data-line={lineNumber}
+            data-segment={`${startCol}-${endCol}`}
             className="flex"
             style={{ height: lineHeightPx }}
           >
@@ -1573,7 +1927,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                 whiteSpace: "pre",
               }}
             >
-              {content || " "}
+              {segmentContent || " "}
             </span>
           </div>,
         );
@@ -1582,12 +1936,13 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       const MAX_TOKENS_PER_LINE = 800;
       const MAX_COLUMNS_PER_LINE_FOR_TOKENIZED_RENDER = 2000;
       if (
-        content.length > MAX_COLUMNS_PER_LINE_FOR_TOKENIZED_RENDER ||
+        segmentContent.length > MAX_COLUMNS_PER_LINE_FOR_TOKENIZED_RENDER ||
         tokens.length > MAX_TOKENS_PER_LINE
       ) {
         return setCacheAndReturn(
           <div
             data-line={lineNumber}
+            data-segment={`${startCol}-${endCol}`}
             className="flex"
             style={{ height: lineHeightPx }}
           >
@@ -1597,28 +1952,33 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                 whiteSpace: "pre",
               }}
             >
-              {content || " "}
+              {segmentContent || " "}
             </span>
           </div>,
         );
       }
       const sorted = [...tokens]
+        .filter(
+          (t) =>
+            t.startOffset.row === lineNumber &&
+            t.endOffset.col > startCol &&
+            t.startOffset.col < endCol,
+        )
         .sort((a, b) => a.startOffset.col - b.startOffset.col)
         .slice(0, MAX_TOKENS_PER_LINE);
 
       const spans: React.ReactNode[] = [];
 
-      let lastCol = 0;
+      let lastCol = startCol;
       sorted.forEach((t, i) => {
-        if (t.startOffset.row !== lineNumber) return;
-        const lineLen = content.length;
-        const rawStart = t.startOffset.col;
-        const rawEnd = t.endOffset.col;
-        const start = Math.max(0, Math.min(rawStart, lineLen));
-        const end = Math.max(0, Math.min(rawEnd, lineLen));
-        const gapStart = Math.max(0, Math.min(lastCol, lineLen));
+        const lineLen = fullContent.length;
+        const rawStart = Math.max(startCol, t.startOffset.col);
+        const rawEnd = Math.min(endCol, t.endOffset.col);
+        const start = Math.max(startCol, Math.min(rawStart, lineLen));
+        const end = Math.max(start, Math.min(rawEnd, lineLen));
+        const gapStart = Math.max(startCol, Math.min(lastCol, lineLen));
         if (start > gapStart) {
-          const gap = content.slice(gapStart, start);
+          const gap = fullContent.slice(gapStart, start);
           if (gap.length > 0) {
             spans.push(
               <span
@@ -1634,10 +1994,10 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           }
         }
         if (end > start) {
-          const slice = content.slice(start, end);
+          const slice = fullContent.slice(start, end);
           spans.push(
             <span
-              key={"tok-" + i + "-" + lineNumber}
+              key={"tok-" + i + "-" + lineNumber + "-" + start}
               style={{ color: tokenColor(t.type), whiteSpace: "pre" }}
             >
               {slice || " "}
@@ -1646,24 +2006,27 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         }
         lastCol = Math.max(lastCol, end);
       });
-      const tailStart = Math.max(0, Math.min(lastCol, content.length));
-      if (tailStart < content.length) {
+      const tailStart = Math.max(
+        startCol,
+        Math.min(lastCol, fullContent.length),
+      );
+      if (tailStart < endCol) {
         spans.push(
           <span
-            key={"final-gap-" + lineNumber}
+            key={"final-gap-" + lineNumber + "-" + tailStart}
             style={{
               color: tokenColor("untokenized"),
               whiteSpace: "pre",
             }}
           >
-            {content.slice(tailStart)}
+            {fullContent.slice(tailStart, endCol)}
           </span>,
         );
       }
-      if (content.length === 0) {
+      if (segmentContent.length === 0) {
         spans.push(
           <span
-            key={"empty-" + lineNumber}
+            key={"empty-" + lineNumber + "-" + startCol}
             style={{ color: tokenColor("untokenized"), whiteSpace: "pre" }}
           >
             {" "}
@@ -1673,6 +2036,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       return setCacheAndReturn(
         <div
           data-line={lineNumber}
+          data-segment={`${startCol}-${endCol}`}
           className="flex"
           style={{ height: lineHeightPx }}
         >
@@ -1694,9 +2058,13 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         handleContainerClick(e);
       }}
     >
+
+
+
       <div
         ref={containerRef}
-        className="absolute inset-0 overflow-auto"
+        className="absolute inset-0 overflow-auto scroll-thin s"
+        style={{ background: "var(--background-secondary-color)" }}
         onScroll={(e) => {
           setContextMenu(null);
 
@@ -1730,151 +2098,194 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           <div
             style={{
               position: "absolute",
-              transform: `translateY(${firstVisibleLine * lineHeightPx}px)`,
+              transform: `translateY(${firstVisibleSegment * lineHeightPx}px)`,
               willChange: "transform",
               left: 0,
               right: 0,
             }}
           >
-            {visibleLines.map((ln) => (
-              <div
-                key={ln}
-                className={
-                  "px-2 flex" +
-                  (ln === cursor.row
-                    ? " bg-(--background-accent-color)/30"
-                    : "") +
-                  (sel &&
-                  ln >= Math.min(sel.startRow, sel.endRow) &&
-                  ln <= Math.max(sel.startRow, sel.endRow)
-                    ? " bg-(--background-accent-color)/50"
-                    : "")
+            {visibleSegments.map((seg) => {
+              const ln =
+                wrapEnabled &&
+                wrapCols > 0 &&
+                prefixSegments.length === fileLineCount + 1
+                  ? segmentToLine(seg)
+                  : seg;
+              const segIndexWithinLine =
+                wrapEnabled &&
+                wrapCols > 0 &&
+                prefixSegments.length === fileLineCount + 1
+                  ? seg - prefixSegments[ln]
+                  : 0;
+              const lineStr = buffer.getLine(ln);
+              let startCol: number;
+              let endCol: number;
+              if (wrapEnabled && wrapCols > 0) {
+                if (wrapMode === "word") {
+                  const starts = segmentStarts[ln] || [0];
+                  startCol = starts[segIndexWithinLine] ?? 0;
+                  const nextStart = starts[segIndexWithinLine + 1];
+                  endCol = nextStart != null ? nextStart : lineStr.length;
+                } else {
+                  startCol = segIndexWithinLine * wrapCols;
+                  endCol = Math.min(startCol + wrapCols, lineStr.length);
                 }
-                style={{
-                  minHeight: lineHeightPx,
-                  height: lineHeightPx,
-                  fontFamily: "var(--editor-font-family)",
-                  fontSize: "var(--editor-font-size)",
-                  lineHeight: `${lineHeightPx}px`,
-                  whiteSpace: "pre",
-                }}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  if (e.button !== 0) {
-                    return;
-                  }
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const x = e.clientX - rect.left;
-                  const xContent = Math.max(0, x - gutterPx);
-                  const col = Math.floor(xContent / charWidthPx);
-                  if (e.detail === 3) {
-                    const len = buffer.getLine(ln).length;
-                    clearExtraCursors();
-                    dragAnchorRef.current = { row: ln, col: 0 };
-                    setSel({
-                      startRow: ln,
-                      startCol: 0,
-                      endRow: ln,
-                      endCol: len,
-                    });
-                    moveCaret(ln, len);
-                    hiddenInputRef.current?.focus();
-                    return;
-                  }
-                  if (e.detail === 2) {
-                    const lineStr = buffer.getLine(ln);
-                    let s = Math.max(0, Math.min(col, lineStr.length));
-                    let start = s;
-                    while (start > 0 && /\w/.test(lineStr[start - 1])) start--;
-                    let end = s;
-                    while (end < lineStr.length && /\w/.test(lineStr[end]))
-                      end++;
-                    clearExtraCursors();
-                    dragAnchorRef.current = { row: ln, col: start };
-                    setSel({
-                      startRow: ln,
-                      startCol: start,
-                      endRow: ln,
-                      endCol: end,
-                    });
-                    moveCaret(ln, end);
-                    hiddenInputRef.current?.focus();
-                    return;
-                  }
-                  if (e.ctrlKey || e.metaKey) {
-                    addCursor(ln, col);
-                  } else if (e.shiftKey) {
-                    const anchor = sel
-                      ? { row: sel.startRow, col: sel.startCol }
-                      : { row: cursor.row, col: cursor.col };
-                    dragAnchorRef.current = { ...anchor };
-                    setSel({
-                      startRow: anchor.row,
-                      startCol: anchor.col,
-                      endRow: ln,
-                      endCol: col,
-                    });
-                    moveCaret(ln, col);
-                  } else {
-                    clearExtraCursors();
-                    dragAnchorRef.current = { row: ln, col };
-                    setSel({
-                      startRow: ln,
-                      startCol: col,
-                      endRow: ln,
-                      endCol: col,
-                    });
-                    moveCaret(ln, col);
-                  }
-                  hiddenInputRef.current?.focus();
-                }}
-                onMouseMove={(e) => {
-                  if (e.buttons === 1) {
-                    const anchor = dragAnchorRef.current;
-                    if (!anchor) return;
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const x = e.clientX - rect.left;
-                    const xContent = Math.max(0, x - gutterPx);
-                    const col = Math.floor(xContent / charWidthPx);
-                    setSel((_s) => ({
-                      startRow: anchor.row,
-                      startCol: anchor.col,
-                      endRow: ln,
-                      endCol: col,
-                    }));
-                    moveCaret(ln, col);
-                  }
-                }}
-                onMouseUp={(e) => {
-                  e.stopPropagation();
-                  if (dragAnchorRef.current)
-                    suppressNextClickRef.current = true;
-                  dragAnchorRef.current = null;
-                }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                }}
-              >
+              } else {
+                startCol = 0;
+                endCol = lineStr.length;
+              }
+              const isCursorLine = ln === cursor.row;
+              const isSelLine =
+                sel &&
+                ln >= Math.min(sel.startRow, sel.endRow) &&
+                ln <= Math.max(sel.startRow, sel.endRow);
+              return (
                 <div
-                  className="select-none text-[11px] text-right shrink-0"
+                  key={"seg-" + seg}
+                  className={
+                    "px-2 flex" +
+                    (isCursorLine ? " bg-(--background-accent-color)/30" : "") +
+                    (isSelLine ? " bg-(--background-accent-color)/50" : "")
+                  }
                   style={{
-                    width: gutterPx - 8,
-                    paddingRight: 8,
-                    color:
-                      ln === cursor.row ||
-                      (sel &&
-                        ln >= Math.min(sel.startRow, sel.endRow) &&
-                        ln <= Math.max(sel.startRow, sel.endRow))
-                        ? "var(--text-color)"
-                        : "var(--token-comments)",
+                    minHeight: lineHeightPx,
+                    height: lineHeightPx,
+                    fontFamily: "var(--editor-font-family)",
+                    fontSize: "var(--editor-font-size)",
+                    lineHeight: `${lineHeightPx}px`,
+                    whiteSpace: "pre",
+                  }}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.button !== 0) {
+                      return;
+                    }
+
+                                        const rect = e.currentTarget.getBoundingClientRect();
+
+                                        const x = e.clientX - rect.left;
+
+                                        const xContent = Math.max(0, x - gutterPx);
+
+                                        const col = Math.min(endCol, startCol + Math.floor(xContent / charWidthPx));
+
+                    if (e.detail === 3) {
+                      const len = buffer.getLine(ln).length;
+                      clearExtraCursors();
+                      dragAnchorRef.current = { row: ln, col: 0 };
+                      setSel({
+                        startRow: ln,
+                        startCol: 0,
+                        endRow: ln,
+                        endCol: len,
+                      });
+                      moveCaret(ln, len);
+                      hiddenInputRef.current?.focus();
+                      return;
+                    }
+                    if (e.detail === 2) {
+                      const lineStr = buffer.getLine(ln);
+                      let s = Math.max(0, Math.min(col, lineStr.length));
+                      let start = s;
+                      while (start > 0 && /\w/.test(lineStr[start - 1]))
+                        start--;
+                      let end = s;
+                      while (end < lineStr.length && /\w/.test(lineStr[end]))
+                        end++;
+                      clearExtraCursors();
+                      dragAnchorRef.current = { row: ln, col: start };
+                      setSel({
+                        startRow: ln,
+                        startCol: start,
+                        endRow: ln,
+                        endCol: end,
+                      });
+                      moveCaret(ln, end);
+                      hiddenInputRef.current?.focus();
+                      return;
+                    }
+                    if (e.ctrlKey || e.metaKey) {
+                      addCursor(ln, col);
+                    } else if (e.shiftKey) {
+                      const anchor = sel
+                        ? { row: sel.startRow, col: sel.startCol }
+                        : { row: cursor.row, col: cursor.col };
+                      dragAnchorRef.current = { ...anchor };
+                      setSel({
+                        startRow: anchor.row,
+                        startCol: anchor.col,
+                        endRow: ln,
+                        endCol: col,
+                      });
+                      moveCaret(ln, col);
+                    } else {
+                      clearExtraCursors();
+                      dragAnchorRef.current = { row: ln, col };
+                      setSel({
+                        startRow: ln,
+                        startCol: col,
+                        endRow: ln,
+                        endCol: col,
+                      });
+                      moveCaret(ln, col);
+                    }
+                    hiddenInputRef.current?.focus();
+                  }}
+                  onMouseMove={(e) => {
+                    if (e.buttons === 1) {
+                      const anchor = dragAnchorRef.current;
+                      if (!anchor) return;
+
+                                            const rect = e.currentTarget.getBoundingClientRect();
+
+                                            const x = e.clientX - rect.left;
+
+                                            const xContent = Math.max(0, x - gutterPx);
+
+                                            const col = Math.min(endCol, startCol + Math.floor(xContent / charWidthPx));
+
+                      setSel((_s) => ({
+                        startRow: anchor.row,
+                        startCol: anchor.col,
+                        endRow: ln,
+                        endCol: col,
+                      }));
+                      moveCaret(ln, col);
+                    }
+                  }}
+                  onMouseUp={(e) => {
+                    e.stopPropagation();
+                    if (dragAnchorRef.current)
+                      suppressNextClickRef.current = true;
+                    dragAnchorRef.current = null;
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
                   }}
                 >
-                  {ln + 1}
+                  <div
+                    className="select-none text-[11px] text-right shrink-0"
+                    style={{
+                      width: gutterPx - 8,
+                      paddingRight: 8,
+                      color:
+                        ln === cursor.row ||
+                        (sel &&
+                          ln >= Math.min(sel.startRow, sel.endRow) &&
+                          ln <= Math.max(sel.startRow, sel.endRow))
+                          ? "var(--text-color)"
+                          : "var(--token-comments)",
+                    }}
+                  >
+                    {ln + 1}
+                  </div>
+                  <div className="flex-1">
+                    {renderLineTokens(ln, startCol, endCol)}
+                  </div>
                 </div>
-                <div className="flex-1">{renderLineTokens(ln)}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
@@ -1927,38 +2338,70 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
               ? { row: eRow, col: eCol }
               : { row: sRow, col: sCol };
           const rects: JSX.Element[] = [];
-          const visStart = firstVisibleLine;
-          const visEnd = Math.min(
-            fileLineCount - 1,
-            firstVisibleLine + visibleLineCount + overscan,
-          );
-          const fromR = Math.max(startFirst.row, visStart);
-          const toR = Math.min(endLast.row, visEnd);
+          const fromR = startFirst.row;
+          const toR = endLast.row;
           for (let r = fromR; r <= toR; r++) {
+            const lineLen = buffer.getLine(r).length;
             const fromCol = r === startFirst.row ? startFirst.col : 0;
-            const toCol =
-              r === endLast.row ? endLast.col : buffer.getLine(r).length;
-            const top = r * lineHeightPx - scrollTop;
-            const left = gutterPx + fromCol * charWidthPx;
-            const width = Math.max(0, (toCol - fromCol) * charWidthPx);
-            rects.push(
-              <div
-                key={"sel-" + r}
-                style={{
-                  position: "absolute",
-                  top,
-                  left,
-                  width,
-                  height: lineHeightPx,
-                  background: "var(--background-accent-color)",
-                  opacity: 0.3,
-                  pointerEvents: "none",
-                }}
-              />,
-            );
+            const toCol = r === endLast.row ? endLast.col : lineLen;
+            if (
+              wrapEnabled &&
+              wrapCols > 0 &&
+              prefixSegments.length === fileLineCount + 1
+            ) {
+              // Break selection into wrapped segments
+              let currentCol = fromCol;
+              while (currentCol < toCol) {
+                const segIdxWithinLine = Math.floor(currentCol / wrapCols);
+                const segStartCol = segIdxWithinLine * wrapCols;
+                const segEndCol = Math.min(segStartCol + wrapCols, lineLen);
+                const drawStart = currentCol;
+                const drawEnd = Math.min(toCol, segEndCol);
+                const visualRow = prefixSegments[r] + segIdxWithinLine;
+                const top = visualRow * lineHeightPx - scrollTop;
+                const left = gutterPx + (drawStart - segStartCol) * charWidthPx;
+                const width = Math.max(0, (drawEnd - drawStart) * charWidthPx);
+                rects.push(
+                  <div
+                    key={"sel-" + r + "-" + segIdxWithinLine + "-" + drawStart}
+                    style={{
+                      position: "absolute",
+                      top,
+                      left,
+                      width,
+                      height: lineHeightPx,
+                      background: "var(--background-accent-color)",
+                      opacity: 0.3,
+                      pointerEvents: "none",
+                    }}
+                  />,
+                );
+                currentCol = drawEnd;
+              }
+            } else {
+              const top = r * lineHeightPx - scrollTop;
+              const left = gutterPx + fromCol * charWidthPx;
+              const width = Math.max(0, (toCol - fromCol) * charWidthPx);
+              rects.push(
+                <div
+                  key={"sel-" + r}
+                  style={{
+                    position: "absolute",
+                    top,
+                    left,
+                    width,
+                    height: lineHeightPx,
+                    background: "var(--background-accent-color)",
+                    opacity: 0.3,
+                    pointerEvents: "none",
+                  }}
+                />,
+              );
+            }
           }
           return <>{rects}</>;
         })()}
+
       <div
         ref={caretRef}
         style={{
