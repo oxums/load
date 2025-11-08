@@ -9,6 +9,7 @@ mod task;
 use serde::Serialize;
 
 use tauri::{AppHandle, Emitter, State};
+use tree_sitter::{Language, Parser, Point};
 
 static READY_ALREADY_CALLED: AtomicBool = AtomicBool::new(false);
 
@@ -190,6 +191,84 @@ fn write_line(
 }
 
 #[tauri::command]
+fn insert_line(
+    app: AppHandle,
+    state: State<'_, EditorState>,
+    num: usize,
+    content: String,
+) -> Result<(), String> {
+    let mut guard = state.0.lock().unwrap();
+    if let Some(file) = guard.as_mut() {
+        // Clamp insertion index
+        let idx = if num > file.lines.len() {
+            file.lines.len()
+        } else {
+            num
+        };
+        if idx >= file.lines.len() {
+            // Append (may have gaps -> fill with empty lines)
+            if idx > file.lines.len() {
+                // Fill gaps with empty lines
+                while file.lines.len() < idx {
+                    file.lines.push(String::new());
+                }
+            }
+            file.lines.push(content.clone());
+        } else {
+            file.lines.insert(idx, content.clone());
+        }
+
+        // Recompute size (sum of lengths + newline chars)
+        file.size =
+            file.lines.iter().map(|l| l.len()).sum::<usize>() + file.lines.len().saturating_sub(1);
+
+        // Emit update for the inserted line including total line count so frontend can shift its pools.
+        app.emit(
+            "file-updated",
+            serde_json::json!({
+              "line": idx,
+              "content": file.lines[idx],
+              "totalLines": file.lines.len()
+            }),
+        )
+        .map_err(|e| e.to_string())
+        .ok();
+
+        Ok(())
+    } else {
+        Err("no file opened".to_string())
+    }
+}
+
+#[tauri::command]
+fn remove_line(app: AppHandle, state: State<'_, EditorState>, num: usize) -> Result<(), String> {
+    let mut guard = state.0.lock().unwrap();
+    if let Some(file) = guard.as_mut() {
+        if num >= file.lines.len() {
+            return Ok(()); // nothing to remove
+        }
+        file.lines.remove(num);
+        file.size =
+            file.lines.iter().map(|l| l.len()).sum::<usize>() + file.lines.len().saturating_sub(1);
+
+        // Emit an update for the removed line index (now occupied by the following line, or empty)
+        app.emit(
+            "file-updated",
+            serde_json::json!({
+              "line": num,
+              "content": file.lines.get(num).cloned().unwrap_or_default(),
+              "totalLines": file.lines.len()
+            }),
+        )
+        .map_err(|e| e.to_string())
+        .ok();
+        Ok(())
+    } else {
+        Err("no file opened".to_string())
+    }
+}
+
+#[tauri::command]
 fn request_tokenization(
     app: AppHandle,
     state: State<'_, EditorState>,
@@ -197,25 +276,59 @@ fn request_tokenization(
     line_end: usize,
 ) -> Result<(), String> {
     let guard = state.0.lock().unwrap();
+
     if let Some(file) = guard.as_ref() {
         if file.lines.is_empty() {
             app.emit("tokenization", Vec::<Token>::new())
                 .map_err(|e| e.to_string())
                 .ok();
+
             return Ok(());
         }
+
         let start = line_start.min(file.lines.len().saturating_sub(1));
         let end = line_end.min(file.lines.len().saturating_sub(1));
+
+        let text = file.lines.join("\n");
         let mut tokens: Vec<Token> = Vec::new();
-        for row in start..=end {
-            let line = &file.lines[row];
-            let len = line.len();
-            tokens.push(Token {
-                start_offset: Offset { row, col: 0 },
-                end_offset: Offset { row, col: len },
-                kind: "untokenized".to_string(),
-            });
+
+        if let Some(lang) = get_ts_language(&file.language) {
+            let mut parser = Parser::new();
+            if parser.set_language(&lang).is_ok() {
+                if let Some(tree) = parser.parse(&text, None) {
+                    let mut raw: Vec<(Point, Point, String)> = Vec::new();
+                    collect_ts_tokens(tree.root_node(), start, end, &mut raw);
+                    for (sp, ep, kind) in raw {
+                        if ep.row < start || sp.row > end {
+                            continue;
+                        }
+                        tokens.push(Token {
+                            start_offset: Offset {
+                                row: sp.row,
+                                col: sp.column,
+                            },
+                            end_offset: Offset {
+                                row: ep.row,
+                                col: ep.column,
+                            },
+                            kind,
+                        });
+                    }
+                }
+            }
         }
+
+        if tokens.is_empty() {
+            for row in start..=end {
+                let len = file.lines[row].len();
+                tokens.push(Token {
+                    start_offset: Offset { row, col: 0 },
+                    end_offset: Offset { row, col: len },
+                    kind: "untokenized".to_string(),
+                });
+            }
+        }
+
         app.emit("tokenization", &tokens)
             .map_err(|e| e.to_string())
             .ok();
@@ -297,7 +410,45 @@ fn detect_language_from_extension(path: &PathBuf) -> String {
         "ml" | "mli" => "ocaml".into(),
         "sh" | "bash" => "bash".into(),
         "ps1" | "psm1" | "psd1" => "powershell".into(),
+
         other => other.to_string(),
+    }
+}
+
+fn get_ts_language(language: &str) -> Option<Language> {
+    match language.to_ascii_lowercase().as_str() {
+        "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "javascript" => Some(tree_sitter_javascript::LANGUAGE.into()),
+        "typescript" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+        "json" => Some(tree_sitter_json::LANGUAGE.into()),
+        "css" => Some(tree_sitter_css::LANGUAGE.into()),
+        "html" => Some(tree_sitter_html::LANGUAGE.into()),
+        _ => None,
+    }
+}
+
+fn collect_ts_tokens(
+    node: tree_sitter::Node,
+    row_start: usize,
+    row_end: usize,
+    out: &mut Vec<(Point, Point, String)>,
+) {
+    let start_pos = node.start_position();
+    let end_pos = node.end_position();
+
+    if end_pos.row < row_start || start_pos.row > row_end {
+        return;
+    }
+
+    if node.child_count() == 0 {
+        out.push((start_pos, end_pos, node.kind().to_string()));
+        return;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_ts_tokens(child, row_start, row_end, out);
     }
 }
 
@@ -323,13 +474,9 @@ fn create_empty_file(
 
     let meta = FileMetadata {
         name: name.clone(),
-
         path: path.clone(),
-
         size: 0,
-
         language: language.clone(),
-
         line_count: lines.len(),
     };
 
@@ -369,6 +516,8 @@ pub fn run() {
             create_empty_file,
             read_line,
             write_line,
+            insert_line,
+            remove_line,
             request_tokenization,
             save_buffer,
             change_language,

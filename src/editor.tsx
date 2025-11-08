@@ -7,7 +7,9 @@ interface LoadFileHandle {
   readLine(num: number): string;
   writeLine(num: number, content: string): void;
   close(): void;
-  reciveUpdate(callback: (line: number, content: string) => void): void;
+  reciveUpdate(
+    callback: (line: number, content: string, totalLines?: number) => void,
+  ): void;
   metadata: {
     name: string;
     path: string;
@@ -91,7 +93,9 @@ function createFileBuffer(initial: string[]): FileBuffer {
 }
 
 function tokenColor(type: string) {
-  switch (type) {
+  const lowered = type.toLowerCase();
+  // Direct category mapping
+  switch (lowered) {
     case "types":
       return "var(--token-types)";
     case "numbers":
@@ -107,9 +111,100 @@ function tokenColor(type: string) {
     case "variables":
       return "var(--token-variables)";
     case "untokenized":
-    default:
       return "var(--token-untokenized)";
   }
+  // Heuristic mapping for raw Tree-sitter node kinds
+  if (lowered.includes("comment")) return "var(--token-comments)";
+  if (lowered.includes("string") || lowered.includes("char"))
+    return "var(--token-strings)";
+  if (
+    lowered.includes("number") ||
+    lowered.includes("int") ||
+    lowered.includes("float") ||
+    lowered.includes("digit")
+  )
+    return "var(--token-numbers)";
+  if (
+    lowered.includes("function") ||
+    lowered.includes("method") ||
+    lowered === "fn_item"
+  )
+    return "var(--token-functions)";
+  if (
+    lowered.includes("class") ||
+    lowered.includes("struct") ||
+    lowered.includes("enum") ||
+    lowered.includes("interface") ||
+    lowered.includes("type")
+  )
+    return "var(--token-types)";
+  if (
+    lowered === "identifier" ||
+    lowered.endsWith("_identifier") ||
+    lowered.includes("var")
+  )
+    return "var(--token-variables)";
+  if (
+    [
+      "import",
+      "export",
+      "package",
+      "return",
+      "if",
+      "else",
+      "for",
+      "while",
+      "switch",
+      "case",
+      "break",
+      "continue",
+    ].some((k) => lowered === k || lowered.includes(k + "_"))
+  )
+    return "var(--token-keywords)";
+  return "var(--token-untokenized)";
+}
+
+function mapTreeSitterKindToCategory(kind: string): string {
+  const l = kind.toLowerCase();
+  if (l.includes("comment")) return "comments";
+  if (l.includes("string") || l.includes("char")) return "strings";
+  if (
+    l.includes("number") ||
+    l.includes("int") ||
+    l.includes("float") ||
+    l.includes("digit")
+  )
+    return "numbers";
+  if (l.includes("function") || l.includes("method") || l === "fn_item")
+    return "functions";
+  if (
+    l.includes("class") ||
+    l.includes("struct") ||
+    l.includes("enum") ||
+    l.includes("interface") ||
+    l.includes("type")
+  )
+    return "types";
+  if (l === "identifier" || l.endsWith("_identifier") || l.includes("var"))
+    return "variables";
+  if (
+    [
+      "import",
+      "export",
+      "package",
+      "return",
+      "if",
+      "else",
+      "for",
+      "while",
+      "switch",
+      "case",
+      "break",
+      "continue",
+    ].some((k) => l === k || l.includes(k + "_"))
+  )
+    return "keywords";
+  return "untokenized";
 }
 
 function isPrintableKey(e: KeyboardEvent) {
@@ -133,16 +228,20 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const [buffer] = useState<FileBuffer>(() => createFileBuffer([]));
   const [loadedUpto, setLoadedUpto] = useState(0);
 
-  const [tokensByLine, setTokensByLine] = useState<Map<number, Token[]>>(
+  // Tokenization pool: for each line we keep { version, tokens }
+  const [tokenPool, setTokenPool] = useState<
+    Map<number, { version: number; tokens: Token[] }>
+  >(() => new Map());
+  const [lineVersions, setLineVersions] = useState<Map<number, number>>(
     () => new Map(),
   );
 
-  // total finite line count from backend metadata
+  const pendingTokenizationRef = useRef<null>(null);
+
   const [fileLineCount, setFileLineCount] = useState<number>(() =>
     Math.max(1, (fileHandle.metadata as any).lineCount ?? 1),
   );
 
-  // settings + autosave
   const [settings, setSettings] = useState<any>({});
   useEffect(() => {
     invoke("get_settings")
@@ -156,6 +255,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       })
       .catch(() => {});
   }, []);
+
   const autosave = {
     enabled: settings?.autosave?.enabled ?? true,
     intervalMs: settings?.autosave?.intervalMs ?? 0,
@@ -207,6 +307,9 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     window.addEventListener("blur", h);
     return () => window.removeEventListener("blur", h);
   }, [autosave.onBlur, fileHandle]);
+
+  // (Removed timeout cleanup; no debounce timers now)
+  useEffect(() => {}, []);
 
   const [cursor, setCursor] = useState<{ row: number; col: number }>({
     row: 0,
@@ -306,7 +409,12 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       fileHandle.writeLine(startFirst.row, updated);
 
       setSel(null);
-      fileHandle.requestTokenization(startFirst.row, startFirst.row);
+      // Bump version for the modified line so pool knows it needs refresh
+      setLineVersions((prev) => {
+        const m = new Map(prev);
+        m.set(startFirst.row, (m.get(startFirst.row) ?? 0) + 1);
+        return m;
+      });
 
       scheduleAutosave();
 
@@ -329,10 +437,42 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       buffer.removeLine(r);
     }
 
-    // adjust total line count by removed lines
     setFileLineCount((c) => Math.max(1, c - (endLast.row - startFirst.row)));
+
     setSel(null);
-    fileHandle.requestTokenization(startFirst.row, startFirst.row);
+
+    // Shift token pool entries downward after multi-line deletion (lines removed)
+    setTokenPool((prev) => {
+      const removedCount = endLast.row - startFirst.row;
+      const m = new Map<number, { version: number; tokens: Token[] }>();
+      prev.forEach((val, line) => {
+        if (line < startFirst.row) {
+          m.set(line, val);
+        } else if (line > endLast.row) {
+          // Shift upward by removedCount
+          m.set(line - removedCount, val);
+        }
+        // Lines within deleted block are discarded and will be re-tokenized if visible
+      });
+      return m;
+    });
+    // Bump version of merged first line
+    setLineVersions((prev) => {
+      const removedCount = endLast.row - startFirst.row;
+      const m = new Map<number, number>();
+      prev.forEach((v, line) => {
+        if (line < startFirst.row) {
+          m.set(line, v);
+        } else if (line > endLast.row) {
+          m.set(line - removedCount, v);
+        }
+      });
+      m.set(
+        startFirst.row,
+        (m.get(startFirst.row) ?? 0) + 1, // merged content
+      );
+      return m;
+    });
 
     scheduleAutosave();
   }, [sel, buffer, fileHandle]);
@@ -384,16 +524,28 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       fileHandle.requestTokenization(start, end);
     },
 
-    [loadedUpto, buffer, fileHandle, fileLineCount],
+    [
+      loadedUpto,
+      buffer,
+      fileHandle,
+      fileLineCount,
+      firstVisibleLine,
+      lastVisibleLine,
+    ],
   );
 
   useEffect(() => {
     const off = (e: any) => {
-      const { line, content } = e;
+      const { line, content, totalLines } = e;
       buffer.setLine(line, content);
-      // If backend sends an update for a line we have not accounted for,
-      // extend the known finite line count and sync global.
+      // If backend provides totalLines, trust it; otherwise grow if needed.
       setFileLineCount((current) => {
+        if (typeof totalLines === "number") {
+          try {
+            (window as any).__loadTotalLines = totalLines;
+          } catch {}
+        }
+        if (typeof totalLines === "number") return Math.max(1, totalLines);
         const candidate = line + 1;
         if (candidate > current) {
           try {
@@ -403,40 +555,51 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         }
         return current;
       });
-      setTokensByLine((prev) => {
-        const updated = new Map(prev);
-        updated.delete(line);
-        return updated;
+
+      // Mark line version increment so that visible token request will include this line
+      setLineVersions((prev) => {
+        const m = new Map(prev);
+        m.set(line, (m.get(line) ?? 0) + 1);
+        return m;
       });
+      // Do not clear existing tokens; they stay until replaced to avoid flicker.
     };
-    fileHandle.reciveUpdate((line, content) => {
-      off({ line, content });
+    fileHandle.reciveUpdate((line, content, totalLines) => {
+      off({ line, content, totalLines });
     });
     fileHandle.recieveTokenization((newTokens) => {
-      setTokensByLine((prev) => {
-        const updated = new Map(prev);
-        const byLine = new Map<number, Token[]>();
-        newTokens.forEach((t) => {
-          const line = t.startOffset.row;
-          const arr = byLine.get(line) || [];
-          arr.push(t);
-          byLine.set(line, arr);
-        });
-        byLine.forEach((arr, line) => {
-          updated.set(line, arr);
-          // Also ensure line count grows if tokenization reveals further lines.
-          setFileLineCount((current) => {
-            const candidate = line + 1;
-            if (candidate > current) {
-              try {
-                (window as any).__loadTotalLines = candidate;
-              } catch {}
-              return candidate;
-            }
-            return current;
+      // Group incoming per-line tokens
+      const grouped = new Map<number, Token[]>();
+      newTokens.forEach((t) => {
+        const ln = t.startOffset.row;
+        const arr = grouped.get(ln) || [];
+        arr.push(t);
+        grouped.set(ln, arr);
+      });
+      setTokenPool((prev) => {
+        const next = new Map(prev);
+        grouped.forEach((arr, ln) => {
+          next.set(ln, {
+            version: lineVersions.get(ln) ?? 0,
+            tokens: arr,
           });
         });
-        return updated;
+        return next;
+      });
+      // Adjust file line count if needed
+      setFileLineCount((current) => {
+        let maxLine = current - 1;
+        grouped.forEach((_v, ln) => {
+          if (ln > maxLine) maxLine = ln;
+        });
+        const candidate = maxLine + 1;
+        if (candidate > current) {
+          try {
+            (window as any).__loadTotalLines = candidate;
+          } catch {}
+          return candidate;
+        }
+        return current;
       });
     });
   }, [fileHandle, buffer, setFileLineCount]);
@@ -483,16 +646,22 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     return lines;
   }, [firstVisibleLine, lastVisibleLine, fileLineCount]);
 
-  const requestVisibleTokenization = useCallback(() => {
-    const start = firstVisibleLine;
-    const end = lastVisibleLine;
-    fileHandle.requestTokenization(start, end);
-  }, [firstVisibleLine, lastVisibleLine, fileHandle]);
-
+  // Request tokenization only for lines in view that are missing or stale
   useEffect(() => {
-    const id = setTimeout(requestVisibleTokenization, 50);
-    return () => clearTimeout(id);
-  }, [firstVisibleLine, lastVisibleLine, requestVisibleTokenization]);
+    const need: number[] = [];
+    visibleLines.forEach((ln) => {
+      const version = lineVersions.get(ln) ?? 0;
+      const entry = tokenPool.get(ln);
+      if (!entry || entry.version < version) {
+        need.push(ln);
+      }
+    });
+    if (need.length) {
+      const start = Math.min(...need);
+      const end = Math.max(...need);
+      fileHandle.requestTokenization(start, end);
+    }
+  }, [visibleLines, tokenPool, lineVersions, fileHandle]);
 
   const moveCaret = useCallback(
     (row: number, col: number) => {
@@ -512,33 +681,33 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       }
 
       const line = buffer.getLine(cursor.row);
-
       const before = line.slice(0, cursor.col);
-
       const after = line.slice(cursor.col);
-
       const updated = before + text + after;
 
       buffer.setLine(cursor.row, updated);
-
       fileHandle.writeLine(cursor.row, updated);
-
       moveCaret(cursor.row, cursor.col + text.length);
 
-      setTokensByLine((prev) => {
+      // Bump version for this line; keep old tokens until replacement arrives (no flicker)
+      setLineVersions((prev) => {
         const m = new Map(prev);
-
-        m.delete(cursor.row);
-
+        m.set(cursor.row, (m.get(cursor.row) ?? 0) + 1);
         return m;
       });
 
-      fileHandle.requestTokenization(cursor.row, cursor.row);
-
       scheduleAutosave();
     },
-
-    [cursor, buffer, moveCaret, fileHandle, sel, deleteSelection],
+    [
+      cursor,
+      buffer,
+      moveCaret,
+      fileHandle,
+      sel,
+      deleteSelection,
+      lastVisibleLine,
+      firstVisibleLine,
+    ],
   );
 
   const deleteBackward = useCallback(() => {
@@ -546,61 +715,86 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       deleteSelection();
       return;
     }
+    // If not at column 0, delete a single character to the left
     if (cursor.col > 0) {
       const line = buffer.getLine(cursor.row);
-      const before = line.slice(0, cursor.col - 1);
+      const before = line.slice(0, Math.max(0, cursor.col - 1));
       const after = line.slice(cursor.col);
       const updated = before + after;
       buffer.setLine(cursor.row, updated);
       fileHandle.writeLine(cursor.row, updated);
-      moveCaret(cursor.row, cursor.col - 1);
-      setTokensByLine((prev) => {
+      // Bump version for this line so tokenization pool knows it's stale
+      setLineVersions((prev) => {
         const m = new Map(prev);
-        m.delete(cursor.row);
+        m.set(cursor.row, (m.get(cursor.row) ?? 0) + 1);
         return m;
       });
-
-      fileHandle.requestTokenization(cursor.row, cursor.row);
-
+      moveCaret(cursor.row, Math.max(0, cursor.col - 1));
       scheduleAutosave();
-    } else if (cursor.row > 0) {
-      const prevLine = buffer.getLine(cursor.row - 1);
-
-      const currentLine = buffer.getLine(cursor.row);
-
-      const merged = prevLine + currentLine;
-
-      const newCol = prevLine.length;
-
-      buffer.setLine(cursor.row - 1, merged);
-
-      buffer.removeLine(cursor.row);
-
-      fileHandle.writeLine(cursor.row - 1, merged);
-
-      moveCaret(cursor.row - 1, newCol);
-
-      setTokensByLine((prev) => {
-        const m = new Map(prev);
-
-        m.delete(cursor.row - 1);
-
-        const shifted = new Map<number, Token[]>();
-
-        m.forEach((v, k) => {
-          if (k >= cursor.row) shifted.set(k - 1, v);
-          else shifted.set(k, v);
-        });
-
-        return shifted;
-      });
-
-      setFileLineCount((c) => Math.max(1, c - 1));
-      fileHandle.requestTokenization(cursor.row - 1, cursor.row - 1);
-
-      scheduleAutosave();
+      return;
     }
-  }, [cursor, buffer, moveCaret, fileHandle, sel, deleteSelection]);
+    // At column 0: merge with previous line if possible
+    if (cursor.row === 0) {
+      return;
+    }
+    const prevLine = buffer.getLine(cursor.row - 1);
+    const currentLine = buffer.getLine(cursor.row);
+    const merged = prevLine + currentLine;
+    const newCol = prevLine.length;
+
+    buffer.setLine(cursor.row - 1, merged);
+    buffer.removeLine(cursor.row);
+    fileHandle.writeLine(cursor.row - 1, merged);
+
+    // Keep backend buffer in sync: remove the now-merged line on the backend
+    invoke("remove_line", { num: cursor.row }).catch((e) =>
+      logError("remove_line failed " + (e as Error).message),
+    );
+    moveCaret(cursor.row - 1, newCol);
+
+    setFileLineCount((c) => Math.max(1, c - 1));
+
+    // Shift token pool entries upward from removed line
+    const removedRow = cursor.row;
+    setTokenPool((prev) => {
+      const m = new Map<number, { version: number; tokens: Token[] }>();
+      prev.forEach((val, line) => {
+        if (line < removedRow) {
+          m.set(line, val);
+        } else if (line > removedRow) {
+          m.set(line - 1, val);
+        }
+        // removedRow itself discarded
+      });
+      return m;
+    });
+    setLineVersions((prev) => {
+      const m = new Map<number, number>();
+      prev.forEach((v, line) => {
+        if (line < removedRow) {
+          m.set(line, v);
+        } else if (line > removedRow) {
+          m.set(line - 1, v);
+        }
+      });
+      // bump merged line (removedRow - 1)
+      const merged = removedRow - 1;
+      m.set(merged, (m.get(merged) ?? 0) + 1);
+      return m;
+    });
+
+    scheduleAutosave();
+  }, [
+    cursor,
+    buffer,
+    moveCaret,
+    fileHandle,
+    sel,
+    deleteSelection,
+    firstVisibleLine,
+    lastVisibleLine,
+    fileLineCount,
+  ]);
 
   const insertNewLine = useCallback(() => {
     if (sel) {
@@ -615,28 +809,46 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     buffer.insertLine(cursor.row + 1, after);
 
     fileHandle.writeLine(cursor.row, before);
-    fileHandle.writeLine(cursor.row + 1, after);
+
+    invoke("insert_line", { num: cursor.row + 1, content: after }).catch((e) =>
+      logError("insert_line failed " + (e as Error).message),
+    );
 
     const newRow = cursor.row + 1;
     setFileLineCount((c) => c + 1);
 
-    setTokensByLine((prev) => {
-      const m = new Map(prev);
-
-      m.delete(cursor.row);
-
-      const shifted = new Map<number, Token[]>();
-
-      m.forEach((v, k) => {
-        if (k > cursor.row) shifted.set(k + 1, v);
-        else shifted.set(k, v);
-      });
-
-      return shifted;
-    });
-
     setCursor({ row: newRow, col: 0 });
-    fileHandle.requestTokenization(cursor.row, newRow);
+
+    // Shift token pool entries downward from insertion row
+    const insertRow = cursor.row;
+    setTokenPool((prev) => {
+      const m = new Map<number, { version: number; tokens: Token[] }>();
+      prev.forEach((val, line) => {
+        if (line < insertRow) {
+          m.set(line, val);
+        } else {
+          m.set(line + 1, val);
+        }
+      });
+      // clear tokens for split lines
+      m.delete(insertRow);
+      m.delete(insertRow + 1);
+      return m;
+    });
+    setLineVersions((prev) => {
+      const m = new Map<number, number>();
+      prev.forEach((v, line) => {
+        if (line < insertRow) {
+          m.set(line, v);
+        } else {
+          m.set(line + 1, v);
+        }
+      });
+      // bump versions for affected lines
+      m.set(insertRow, (m.get(insertRow) ?? 0) + 1);
+      m.set(insertRow + 1, (m.get(insertRow + 1) ?? 0) + 1);
+      return m;
+    });
 
     scheduleAutosave();
   }, [
@@ -647,6 +859,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     sel,
     deleteSelection,
     fileLineCount,
+    firstVisibleLine,
+    lastVisibleLine,
   ]);
 
   const handleKeyDown = useCallback(
@@ -773,7 +987,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const renderLineTokens = useCallback(
     (lineNumber: number) => {
       const content = buffer.getLine(lineNumber);
-      const tokens = tokensByLine.get(lineNumber);
+      const tokens = tokenPool.get(lineNumber)?.tokens;
       if (!tokens || tokens.length === 0) {
         return (
           <div
@@ -799,14 +1013,18 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       let lastCol = 0;
       sorted.forEach((t, i) => {
         if (t.startOffset.row !== lineNumber) return;
-        const start = t.startOffset.col;
-        const end = t.endOffset.col;
-        if (start > lastCol) {
-          const gap = content.slice(lastCol, start);
+        const lineLen = content.length;
+        const rawStart = t.startOffset.col;
+        const rawEnd = t.endOffset.col;
+        const start = Math.max(0, Math.min(rawStart, lineLen));
+        const end = Math.max(0, Math.min(rawEnd, lineLen));
+        const gapStart = Math.max(0, Math.min(lastCol, lineLen));
+        if (start > gapStart) {
+          const gap = content.slice(gapStart, start);
           if (gap.length > 0) {
             spans.push(
               <span
-                key={"gap-" + i + "-" + lineNumber + "-" + lastCol}
+                key={"gap-" + i + "-" + lineNumber + "-" + gapStart}
                 style={{
                   color: tokenColor("untokenized"),
                   whiteSpace: "pre",
@@ -817,30 +1035,37 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
             );
           }
         }
-        const slice = content.slice(start, end);
-        spans.push(
-          <span
-            key={"tok-" + i + "-" + lineNumber}
-            style={{ color: tokenColor(t.type), whiteSpace: "pre" }}
-          >
-            {slice || " "}
-          </span>,
-        );
-        lastCol = end;
+
+        if (end > start) {
+          const slice = content.slice(start, end);
+          spans.push(
+            <span
+              key={"tok-" + i + "-" + lineNumber}
+              style={{ color: tokenColor(t.type), whiteSpace: "pre" }}
+            >
+              {slice || " "}
+            </span>,
+          );
+        }
+        lastCol = Math.max(lastCol, end);
       });
-      if (lastCol < content.length) {
+
+      const tailStart = Math.max(0, Math.min(lastCol, content.length));
+      if (tailStart < content.length) {
         spans.push(
           <span
             key={"final-gap-" + lineNumber}
             style={{
               color: tokenColor("untokenized"),
+
               whiteSpace: "pre",
             }}
           >
-            {content.slice(lastCol)}
+            {content.slice(tailStart)}
           </span>,
         );
       }
+
       if (content.length === 0) {
         spans.push(
           <span
@@ -861,7 +1086,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         </div>
       );
     },
-    [tokensByLine, buffer, lineHeightPx],
+    [tokenPool, buffer, lineHeightPx],
   );
 
   return (
@@ -1134,7 +1359,9 @@ export async function createTauriFileHandle(
 ): Promise<LoadFileHandle> {
   const meta = await invoke<any>("open_file", { path });
   const cache = new Map<number, string>();
-  let updateCb: ((line: number, content: string) => void) | null = null;
+  let updateCb:
+    | ((line: number, content: string, totalLines?: number) => void)
+    | null = null;
   let tokenCb:
     | ((
         tokens: Array<{
@@ -1150,9 +1377,9 @@ export async function createTauriFileHandle(
     const un1 = await listen<{ line: number; content: string }>(
       "file-updated",
       (e) => {
-        const { line, content } = e.payload;
+        const { line, content, totalLines } = e.payload as any;
         cache.set(line, content);
-        if (updateCb) updateCb(line, content);
+        if (updateCb) updateCb(line, content, totalLines);
       },
     );
     unlisten.push(un1);
@@ -1228,9 +1455,79 @@ export async function createTauriFileHandle(
         logError("request_tokenization failed " + (e as Error).message),
       );
     },
+
     recieveTokenization(callback) {
-      tokenCb = callback;
+      // Map raw Tree-sitter kinds; split multi-line tokens into per-line segments
+
+      tokenCb = (tokens) => {
+        const pieces: Array<{
+          startOffset: TokenOffset;
+
+          endOffset: TokenOffset;
+
+          type: string;
+        }> = [];
+
+        const BIG = 2147483647;
+
+        for (const t of tokens) {
+          const mappedType = mapTreeSitterKindToCategory(t.type);
+
+          const sRow = t.startOffset.row;
+
+          const eRow = t.endOffset.row;
+
+          const sCol = t.startOffset.col;
+
+          const eCol = t.endOffset.col;
+
+          if (sRow === eRow) {
+            pieces.push({
+              startOffset: { row: sRow, col: sCol },
+
+              endOffset: { row: eRow, col: eCol },
+
+              type: mappedType,
+            });
+          } else {
+            // First line: start col -> end of line
+
+            pieces.push({
+              startOffset: { row: sRow, col: sCol },
+
+              endOffset: { row: sRow, col: BIG },
+
+              type: mappedType,
+            });
+
+            // Middle full lines
+
+            for (let r = sRow + 1; r < eRow; r++) {
+              pieces.push({
+                startOffset: { row: r, col: 0 },
+
+                endOffset: { row: r, col: BIG },
+
+                type: mappedType,
+              });
+            }
+
+            // Last line: col 0 -> end col
+
+            pieces.push({
+              startOffset: { row: eRow, col: 0 },
+
+              endOffset: { row: eRow, col: eCol },
+
+              type: mappedType,
+            });
+          }
+        }
+
+        callback(pieces);
+      };
     },
+
     saveBuffer() {
       invoke("save_buffer").catch((e) =>
         logError("save_buffer failed " + (e as Error).message),
