@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -383,6 +383,13 @@ struct DirEntryItem {
     children: Option<Vec<DirEntryItem>>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PathMovedPayload {
+    src: String,
+    dest: String,
+}
+
 fn is_dot_folder(name: &str) -> bool {
     name.starts_with('.')
 }
@@ -395,7 +402,6 @@ fn build_gitignore(root: &Path) -> Option<Gitignore> {
         let _ = builder.add(gi_path);
     }
 
-    // Respect repository local excludes if present
     let info_exclude = root.join(".git").join("info").join("exclude");
     if info_exclude.exists() {
         let _ = builder.add(info_exclude);
@@ -455,7 +461,7 @@ fn list_dir_children(
     for entry in rd {
         let entry = match entry {
             Ok(v) => v,
-            Err(_) => continue, // best-effort: skip unreadable entries
+            Err(_) => continue,
         };
 
         let child_path = entry.path();
@@ -476,7 +482,6 @@ fn list_dir_children(
         }
     }
 
-    // Sort dirs first, then files; both alphabetically (case-insensitive)
     children.sort_by(|a, b| {
         if a.isDir != b.isDir {
             b.isDir.cmp(&a.isDir)
@@ -500,7 +505,6 @@ fn read_directory_root(path: String) -> Result<DirEntryItem, String> {
     let matcher = build_gitignore(&root);
 
     let mut node = build_dir_entry(&root, &root, matcher.as_ref())?;
-    // Shallow children only
     let children = list_dir_children(&root, &root, matcher.as_ref())?;
     node.children = Some(children);
     Ok(node)
@@ -568,6 +572,22 @@ fn get_ts_language(language: &str) -> Option<Language> {
         "json" => Some(tree_sitter_json::LANGUAGE.into()),
         "css" => Some(tree_sitter_css::LANGUAGE.into()),
         "html" => Some(tree_sitter_html::LANGUAGE.into()),
+        "markdown" => Some(tree_sitter_md::LANGUAGE.into()),
+        "python" => Some(tree_sitter_python::LANGUAGE.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
+        "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        "c" => Some(tree_sitter_c::LANGUAGE.into()),
+        "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        "zig" => Some(tree_sitter_zig::LANGUAGE.into()),
+        "lua" => Some(tree_sitter_lua::LANGUAGE.into()),
+        "dart" => Some(tree_sitter_dart::language()),
+        "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+        "ruby" => Some(tree_sitter_ruby::LANGUAGE.into()),
+        "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
+        "powershell" => Some(tree_sitter_powershell::LANGUAGE.into()),
+        "haskell" => Some(tree_sitter_haskell::LANGUAGE.into()),
+        "ocaml" => Some(tree_sitter_ocaml::LANGUAGE_OCAML.into()),
+        "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -647,6 +667,101 @@ async fn process_queued_file(path: &String) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[tauri::command]
+fn copy_path(src: String, dest: String) -> Result<(), String> {
+    let src_pb = PathBuf::from(&src);
+    if !src_pb.exists() {
+        return Err("source does not exist".into());
+    }
+    let dest_pb = PathBuf::from(&dest);
+
+    if src_pb.is_dir() {
+        copy_dir_recursive(&src_pb, &dest_pb).map_err(|e| e.to_string())?;
+    } else {
+        if let Some(parent) = dest_pb.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(&src_pb, &dest_pb).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), std::io::Error> {
+    if !dest.exists() {
+        fs::create_dir_all(dest)?;
+    }
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let target = dest.join(name);
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn move_path(src: String, dest: String) -> Result<(), String> {
+    let src_pb = PathBuf::from(&src);
+    if !src_pb.exists() {
+        return Err("source does not exist".into());
+    }
+
+    let dest_pb = PathBuf::from(&dest);
+    if let Some(parent) = dest_pb.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+
+    match fs::rename(&src_pb, &dest_pb) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::CrossesDevices {
+                if src_pb.is_dir() {
+                    copy_dir_recursive(&src_pb, &dest_pb).map_err(|e| e.to_string())?;
+
+                    fs::remove_dir_all(&src_pb).map_err(|e| e.to_string())?;
+                } else {
+                    if let Some(parent) = dest_pb.parent() {
+                        if !parent.exists() {
+                            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    fs::copy(&src_pb, &dest_pb).map_err(|e| e.to_string())?;
+                    fs::remove_file(&src_pb).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            } else {
+                Err(e.to_string())
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn delete_path(path: String) -> Result<(), String> {
+    let pb = PathBuf::from(&path);
+    if !pb.exists() {
+        return Err("path does not exist".into());
+    }
+    if pb.is_dir() {
+        fs::remove_dir_all(&pb).map_err(|e| e.to_string())?;
+    } else {
+        fs::remove_file(&pb).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -667,7 +782,10 @@ pub fn run() {
             request_tokenization,
             save_buffer,
             change_language,
-            close_file
+            close_file,
+            copy_path,
+            move_path,
+            delete_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

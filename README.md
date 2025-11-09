@@ -11,12 +11,10 @@ Zed.dev, my current favorite text editor.
 This project was made for the Build-a-thon hackaton and some things aren't polished.
 Copilot AI was used in the development mainly for boilerplate code / boring tasks.
 
-## File load system
+## todo
 
-- Send state to UI
-- Rust gets file and parses/tokenizes it
-- Send needed tokens to UI
-- UI displays tokens and allows editing
-- Buffer edits are sent back to Rust for processing
-- New tokens to UI
-- Autosave happens based on settings
+- hide error / warnings
+- improve file tree UI
+- general polish
+- settings button
+- AI integration (ollama or something)

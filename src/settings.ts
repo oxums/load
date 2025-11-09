@@ -10,8 +10,8 @@ const defaultValues = {
     text: "#cdd6f4", // text
   },
   ui: {
-    "font-family": '"Zalando Sans", sans-serif',
-    "font-size": "16px",
+    "font-family": '"IBM Plex Sans", sans-serif',
+    "font-size": "14px",
     "line-height": "1.5",
   },
   editor: {

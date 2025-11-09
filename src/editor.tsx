@@ -310,6 +310,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     setFileLineCount(Math.max(1, (fileHandle.metadata as any)?.lineCount ?? 1));
     setTokenPool(new Map());
     setLineVersions(new Map());
+    renderCacheRef.current.clear();
     setCursor({ row: 0, col: 0 });
     setSel(null);
     undoStackRef.current = [];
@@ -319,35 +320,16 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     row: 0,
     col: 0,
   });
-  const [extraCursors, setExtraCursors] = useState<
-    Array<{ row: number; col: number }>
-  >([]);
   const clampPos = useCallback(
     (row: number, col: number) => {
       row = Math.max(0, Math.min(row, Math.max(0, fileLineCount - 1)));
-      const line = buffer.getLine(row);
-      col = Math.max(0, Math.min(col, line.length));
+      col = Math.max(0, Math.min(col, buffer.getLine(row).length));
       return { row, col };
     },
     [buffer, fileLineCount],
   );
-  const addCursor = useCallback(
-    (row: number, col: number) => {
-      const p = clampPos(row, col);
-      if (p.row === cursor.row && p.col === cursor.col) return;
-      setExtraCursors((list) => {
-        for (const c of list)
-          if (c.row === p.row && c.col === p.col) return list;
-        return [...list, p];
-      });
-    },
-    [clampPos, cursor],
-  );
-  const clearExtraCursors = useCallback(() => setExtraCursors([]), []);
-  const getAllCursors = useCallback(
-    () => [{ row: cursor.row, col: cursor.col }, ...extraCursors],
-    [cursor, extraCursors],
-  );
+  const clearExtraCursors = useCallback(() => {}, []);
+
   useEffect(() => {
     try {
       (window as any).__loadCursor = {
@@ -569,9 +551,10 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     return Math.max(32, Math.ceil(charWidthPx * digits) + 12 + 8);
   }, [charWidthPx, fileLineCount]);
 
-  const overscan = 3;
+  const overscan = 5;
   const TOKEN_CONTEXT_BEFORE = 5;
   const TOKEN_CONTEXT_AFTER = 5;
+  const RENDER_CACHE_MAX_ENTRIES = 2000;
   const LOAD_PREFETCH_BEFORE = 50;
   const LOAD_PREFETCH_AFTER = 100;
 
@@ -588,11 +571,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     if (m === "char" || m === "word") setWrapMode(m);
   }, [settings]);
 
-
   useLayoutEffect(() => {
-
     if (!containerRef.current) return;
-
 
     const computeWrap = () => {
       const el = containerRef.current!;
@@ -1305,7 +1285,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         return;
       }
 
-            // Wrap toggles removed; controlled via settings
+      // Wrap toggles removed; controlled via settings
 
       if (e.key === "ArrowLeft") {
         e.preventDefault();
@@ -1406,79 +1386,20 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           scheduleAutosave();
           return;
         }
-        if (extraCursors.length === 0) {
-          const row = cursor.row;
-          const col = cursor.col;
-          if (isForward) {
-            const toCol = nextWord(row, col);
-            if (toCol !== col) {
-              deleteRange(row, col, toCol);
-              moveCaret(row, col);
-            }
-          } else {
-            const fromCol = prevWord(row, col);
-            if (fromCol !== col) {
-              deleteRange(row, fromCol, col);
-              moveCaret(row, fromCol);
-            }
+        const row = cursor.row;
+        const col = cursor.col;
+        if (isForward) {
+          const toCol = nextWord(row, col);
+          if (toCol !== col) {
+            deleteRange(row, col, toCol);
+            moveCaret(row, col);
           }
-          setSel(null);
-          scheduleAutosave();
-          return;
-        }
-        const carets = getAllCursors()
-          .slice()
-          .sort((a, b) => (a.row === b.row ? a.col - b.col : a.row - b.row));
-        const byLine: Record<number, Array<number>> = {};
-        carets.forEach((c) => {
-          byLine[c.row] = byLine[c.row] || [];
-          byLine[c.row].push(c.col);
-        });
-        Object.entries(byLine).forEach(([rowStr, cols]) => {
-          const row = parseInt(rowStr, 10);
-          cols.sort((a, b) => a - b);
-          let line = buffer.getLine(row);
-          let offset = 0;
-          if (isForward) {
-            cols.forEach((col) => {
-              const start = col + offset;
-              let end = start;
-              const n = line.length;
-              while (end < n && /\s/.test(line[end])) end++;
-              while (end < n && /[A-Za-z0-9_]/.test(line[end])) end++;
-              if (end > start) {
-                line = line.slice(0, start) + line.slice(end);
-                offset -= end - start;
-              }
-            });
-          } else {
-            cols.forEach((col) => {
-              const end = col + offset;
-              let start = end;
-              while (start > 0 && /\s/.test(line[start - 1])) start--;
-              while (start > 0 && /[A-Za-z0-9_]/.test(line[start - 1])) start--;
-              if (start < end) {
-                line = line.slice(0, start) + line.slice(end);
-                offset -= end - start;
-              }
-            });
+        } else {
+          const fromCol = prevWord(row, col);
+          if (fromCol !== col) {
+            deleteRange(row, fromCol, col);
+            moveCaret(row, fromCol);
           }
-          buffer.setLine(row, line);
-          fileHandle.writeLine(row, line);
-          setLineVersions((prev) => {
-            const m = new Map(prev);
-            m.set(row, (m.get(row) ?? 0) + 1);
-            return m;
-          });
-        });
-        if (!isForward) {
-          setCursor((c) => ({ row: c.row, col: prevWord(c.row, c.col) }));
-          setExtraCursors((prev) =>
-            prev.map((c) => ({
-              row: c.row,
-              col: prevWord(c.row, c.col),
-            })),
-          );
         }
         setSel(null);
         scheduleAutosave();
@@ -1486,54 +1407,11 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       }
       if (e.key === "Backspace") {
         e.preventDefault();
-        if (!ctrl) clearExtraCursors();
         pushUndoSnapshot();
-        if (extraCursors.length === 0) {
-          if (sel) {
-            deleteSelection();
-          } else {
-            deleteBackward();
-          }
+        if (sel) {
+          deleteSelection();
         } else {
-          const carets = getAllCursors()
-            .slice()
-            .sort((a, b) => (a.row === b.row ? a.col - b.col : a.row - b.row));
-          const byLine: Record<number, Array<{ col: number }>> = {};
-          carets.forEach((c) => {
-            byLine[c.row] = byLine[c.row] || [];
-            byLine[c.row].push({ col: c.col });
-          });
-          Object.entries(byLine).forEach(([rowStr, cols]) => {
-            const row = parseInt(rowStr, 10);
-            cols.sort((a, b) => a.col - b.col);
-            let line = buffer.getLine(row);
-            let offset = 0;
-            cols.forEach(({ col }) => {
-              const actual = col + offset;
-              if (actual <= 0) return;
-              line = line.slice(0, actual - 1) + line.slice(actual);
-              offset -= 1;
-            });
-            buffer.setLine(row, line);
-            fileHandle.writeLine(row, line);
-            setLineVersions((prev) => {
-              const m = new Map(prev);
-              m.set(row, (m.get(row) ?? 0) + 1);
-              return m;
-            });
-          });
-          const newPrimary = {
-            row: cursor.row,
-            col: Math.max(0, cursor.col - 1),
-          };
-          setCursor(newPrimary);
-          setExtraCursors((prev) =>
-            prev.map((c) =>
-              c.col > 0
-                ? { row: c.row, col: c.col - 1 }
-                : { row: c.row, col: c.col },
-            ),
-          );
+          deleteBackward();
         }
         setSel(null);
         scheduleAutosave();
@@ -1542,45 +1420,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       if (e.key === "Enter") {
         e.preventDefault();
         pushUndoSnapshot();
-        if (extraCursors.length === 0) {
-          if (sel) deleteSelection();
-          insertNewLine();
-        } else {
-          const carets = getAllCursors()
-            .slice()
-            .sort((a, b) => (a.row === b.row ? a.col - b.col : a.row - b.row));
-          for (let i = carets.length - 1; i >= 0; i--) {
-            const c = carets[i];
-            const line = buffer.getLine(c.row);
-            const before = line.slice(0, c.col);
-            const after = line.slice(c.col);
-            buffer.setLine(c.row, before);
-            buffer.insertLine(c.row + 1, after);
-            fileHandle.writeLine(c.row, before);
-            invoke("insert_line", {
-              num: c.row + 1,
-              content: after,
-            }).catch(() => {});
-            setLineVersions((prev) => {
-              const m = new Map(prev);
-              m.set(c.row, (m.get(c.row) ?? 0) + 1);
-              m.set(c.row + 1, (m.get(c.row + 1) ?? 0) + 1);
-              return m;
-            });
-            setFileLineCount((cnt) => cnt + 1);
-            for (let j = 0; j < i; j++) {
-              if (carets[j].row > c.row) carets[j].row += 1;
-            }
-          }
-          setCursor({
-            row: cursor.row + 1,
-            col: 0,
-          });
-          setExtraCursors((prev) =>
-            prev.map((c) => ({ row: c.row + 1, col: 0 })),
-          );
-        }
-        clearExtraCursors();
+        if (sel) deleteSelection();
+        insertNewLine();
         setSel(null);
         scheduleAutosave();
         return;
@@ -1589,99 +1430,16 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         e.preventDefault();
         pushUndoSnapshot();
         const insertion = "  ";
-        if (extraCursors.length === 0) {
-          if (sel) deleteSelection();
-          insertText(insertion);
-        } else {
-          const carets = getAllCursors()
-            .slice()
-            .sort((a, b) => (a.row === b.row ? a.col - b.col : a.row - b.row));
-          const byLine: Record<number, Array<number>> = {};
-          carets.forEach((c) => {
-            byLine[c.row] = byLine[c.row] || [];
-            byLine[c.row].push(c.col);
-          });
-          Object.entries(byLine).forEach(([rowStr, cols]) => {
-            const row = parseInt(rowStr, 10);
-            cols.sort((a, b) => a - b);
-            let line = buffer.getLine(row);
-            let offset = 0;
-            cols.forEach((col) => {
-              const actual = col + offset;
-              line = line.slice(0, actual) + insertion + line.slice(actual);
-              offset += insertion.length;
-            });
-            buffer.setLine(row, line);
-            fileHandle.writeLine(row, line);
-            setLineVersions((prev) => {
-              const m = new Map(prev);
-              m.set(row, (m.get(row) ?? 0) + 1);
-              return m;
-            });
-          });
-          const shiftMap: Record<string, number> = {};
-          Object.entries(byLine).forEach(([rowStr, cols]) => {
-            const row = parseInt(rowStr, 10);
-            cols.sort((a, b) => a - b);
-            cols.forEach((col, idx) => {
-              shiftMap[`${row}:${col}`] = insertion.length * (idx + 1);
-            });
-          });
-          setCursor((c) => ({
-            row: c.row,
-            col: c.col + insertion.length,
-          }));
-          setExtraCursors((prev) =>
-            prev.map((c) => ({
-              row: c.row,
-              col: c.col + insertion.length,
-            })),
-          );
-        }
+        if (sel) deleteSelection();
+        insertText(insertion);
         scheduleAutosave();
         return;
       }
       if (isPrintableKey(e.nativeEvent)) {
         pushUndoSnapshot();
         const ch = e.key;
-        if (extraCursors.length === 0) {
-          if (sel) deleteSelection();
-          insertText(ch);
-        } else {
-          const carets = getAllCursors()
-            .slice()
-            .sort((a, b) => (a.row === b.row ? a.col - b.col : a.row - b.row));
-          const byLine: Record<number, Array<number>> = {};
-          carets.forEach((c) => {
-            byLine[c.row] = byLine[c.row] || [];
-            byLine[c.row].push(c.col);
-          });
-          Object.entries(byLine).forEach(([rowStr, cols]) => {
-            const row = parseInt(rowStr, 10);
-            cols.sort((a, b) => a - b);
-            let line = buffer.getLine(row);
-            let offset = 0;
-            cols.forEach((col) => {
-              const actual = col + offset;
-              line = line.slice(0, actual) + ch + line.slice(actual);
-              offset += ch.length;
-            });
-            buffer.setLine(row, line);
-            fileHandle.writeLine(row, line);
-            setLineVersions((prev) => {
-              const m = new Map(prev);
-              m.set(row, (m.get(row) ?? 0) + 1);
-              return m;
-            });
-          });
-          setCursor((c) => ({
-            row: c.row,
-            col: c.col + ch.length,
-          }));
-          setExtraCursors((prev) =>
-            prev.map((c) => ({ row: c.row, col: c.col + ch.length })),
-          );
-        }
+        if (sel) deleteSelection();
+        insertText(ch);
         setSel(null);
         scheduleAutosave();
         e.preventDefault();
@@ -1745,13 +1503,9 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       const lineStr = buffer.getLine(line);
       const col = Math.min(lineStr.length, startColOffset + colWithinSeg);
 
-      if (e.ctrlKey || e.metaKey) {
-        addCursor(line, col);
-      } else {
-        clearExtraCursors();
-        setSel(null);
-        moveCaret(line, col);
-      }
+      clearExtraCursors();
+      setSel(null);
+      moveCaret(line, col);
       hiddenInputRef.current?.focus();
     },
     [
@@ -1759,7 +1513,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       charWidthPx,
       moveCaret,
       scrollTop,
-      addCursor,
       clearExtraCursors,
       wrapEnabled,
       wrapCols,
@@ -1907,10 +1660,28 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       const cacheKey = lineNumber + ":" + startCol + ":" + endCol;
       const cached = renderCacheRef.current.get(cacheKey);
 
-      if (cached && cached.version === version) return cached.node;
+      if (cached && cached.version === version) {
+        // Move the entry to the back so it stays hot in the LRU cache.
+        renderCacheRef.current.delete(cacheKey);
+        renderCacheRef.current.set(cacheKey, cached);
+        return cached.node;
+      }
 
       const setCacheAndReturn = (n: JSX.Element) => {
+        renderCacheRef.current.delete(cacheKey);
         renderCacheRef.current.set(cacheKey, { version, node: n });
+        if (renderCacheRef.current.size > RENDER_CACHE_MAX_ENTRIES) {
+          let removed = false;
+          for (const key of renderCacheRef.current.keys()) {
+            if (key === cacheKey) continue;
+            renderCacheRef.current.delete(key);
+            removed = true;
+            break;
+          }
+          if (!removed) {
+            renderCacheRef.current.delete(cacheKey);
+          }
+        }
         return n;
       };
       if (!tokens || tokens.length === 0) {
@@ -1926,6 +1697,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                 color: tokenColor("untokenized"),
                 whiteSpace: "pre",
               }}
+              
+              className="e"
             >
               {segmentContent || " "}
             </span>
@@ -1951,6 +1724,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                 color: tokenColor("untokenized"),
                 whiteSpace: "pre",
               }}
+              
+              className="e"
             >
               {segmentContent || " "}
             </span>
@@ -1987,6 +1762,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                   color: tokenColor("untokenized"),
                   whiteSpace: "pre",
                 }}
+                
+                 className="e"
               >
                 {gap}
               </span>,
@@ -1999,6 +1776,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
             <span
               key={"tok-" + i + "-" + lineNumber + "-" + start}
               style={{ color: tokenColor(t.type), whiteSpace: "pre" }}
+              className="e"
             >
               {slice || " "}
             </span>,
@@ -2018,6 +1796,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
               color: tokenColor("untokenized"),
               whiteSpace: "pre",
             }}
+            className="e"
           >
             {fullContent.slice(tailStart, endCol)}
           </span>,
@@ -2028,6 +1807,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           <span
             key={"empty-" + lineNumber + "-" + startCol}
             style={{ color: tokenColor("untokenized"), whiteSpace: "pre" }}
+            className="e"
           >
             {" "}
           </span>,
@@ -2058,9 +1838,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         handleContainerClick(e);
       }}
     >
-
-
-
       <div
         ref={containerRef}
         className="absolute inset-0 overflow-auto scroll-thin s"
@@ -2162,13 +1939,16 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                       return;
                     }
 
-                                        const rect = e.currentTarget.getBoundingClientRect();
+                    const rect = e.currentTarget.getBoundingClientRect();
 
-                                        const x = e.clientX - rect.left;
+                    const x = e.clientX - rect.left;
 
-                                        const xContent = Math.max(0, x - gutterPx);
+                    const xContent = Math.max(0, x - gutterPx);
 
-                                        const col = Math.min(endCol, startCol + Math.floor(xContent / charWidthPx));
+                    const col = Math.min(
+                      endCol,
+                      startCol + Math.floor(xContent / charWidthPx),
+                    );
 
                     if (e.detail === 3) {
                       const len = buffer.getLine(ln).length;
@@ -2205,9 +1985,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                       hiddenInputRef.current?.focus();
                       return;
                     }
-                    if (e.ctrlKey || e.metaKey) {
-                      addCursor(ln, col);
-                    } else if (e.shiftKey) {
+                    if (e.shiftKey) {
                       const anchor = sel
                         ? { row: sel.startRow, col: sel.startCol }
                         : { row: cursor.row, col: cursor.col };
@@ -2237,13 +2015,16 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                       const anchor = dragAnchorRef.current;
                       if (!anchor) return;
 
-                                            const rect = e.currentTarget.getBoundingClientRect();
+                      const rect = e.currentTarget.getBoundingClientRect();
 
-                                            const x = e.clientX - rect.left;
+                      const x = e.clientX - rect.left;
 
-                                            const xContent = Math.max(0, x - gutterPx);
+                      const xContent = Math.max(0, x - gutterPx);
 
-                                            const col = Math.min(endCol, startCol + Math.floor(xContent / charWidthPx));
+                      const col = Math.min(
+                        endCol,
+                        startCol + Math.floor(xContent / charWidthPx),
+                      );
 
                       setSel((_s) => ({
                         startRow: anchor.row,
@@ -2338,8 +2119,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
               ? { row: eRow, col: eCol }
               : { row: sRow, col: sCol };
           const rects: JSX.Element[] = [];
-          const fromR = startFirst.row;
-          const toR = endLast.row;
+          const fromR = Math.max(startFirst.row, firstVisibleLine);
+          const toR = Math.min(endLast.row, lastVisibleLine);
           for (let r = fromR; r <= toR; r++) {
             const lineLen = buffer.getLine(r).length;
             const fromCol = r === startFirst.row ? startFirst.col : 0;
@@ -2408,24 +2189,10 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           position: "absolute",
           width: 2,
           background: "var(--text-color)",
-          transition: "top 0.02s,left 0.02s",
           pointerEvents: "none",
         }}
       />
-      {extraCursors.map((c, i) => (
-        <div
-          key={"extra-caret-" + i + "-" + c.row + "-" + c.col}
-          style={{
-            position: "absolute",
-            top: c.row * lineHeightPx - scrollTop,
-            left: gutterPx + c.col * charWidthPx,
-            width: 2,
-            height: lineHeightPx,
-            background: "var(--text-color)",
-            pointerEvents: "none",
-          }}
-        />
-      ))}
+
       {contextMenu && (
         <div
           ref={contextMenuRef}

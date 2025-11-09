@@ -1,14 +1,26 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { useState, useEffect, useRef, createContext, useContext } from "react";
+import { openUrl, openPath } from "@tauri-apps/plugin-opener";
+
+import {
+  useState,
+  useEffect,
+  useRef,
+  createContext,
+  useContext,
+  useCallback,
+} from "react";
+import type { DragEvent } from "react";
+
 import Editor from "./editor";
 import {
   open as openDialog,
   save as saveDialog,
 } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { createTauriFileHandle } from "./editor";
 import { getIconSvg } from "./icon";
+import { writeText, readText } from "@tauri-apps/plugin-clipboard-manager";
 
 const MenuContext = createContext<{
   openTab: string | null;
@@ -153,6 +165,18 @@ function App() {
     [],
   );
 
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    path: string;
+    isDir: boolean;
+    name: string;
+  } | null>(null);
+  const [editingPath, setEditingPath] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState<string>("");
+  const dragSourcePathRef = useRef<string | null>(null);
+  const dragOverPathRef = useRef<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const lastOpenFileRef = useRef(0);
 
   const lastNewFileRef = useRef(0);
@@ -214,7 +238,7 @@ function App() {
         className={`flex items-center gap-1 px-1 py-0.5 rounded ${gray} hover:bg-(--background-color)`}
       >
         <span
-          className="inline-block c icon-size"
+          className="inline-block c icon-size pr-1"
           dangerouslySetInnerHTML={{ __html: getIconSvg(node.name, isDir) }}
         />
         <span className="truncate">{node.name}</span>
@@ -272,6 +296,60 @@ function App() {
     return tree;
   }
 
+  const basename = (p: string) => {
+    const n = p.replace(/\\/g, "/");
+    const i = n.lastIndexOf("/");
+    return i >= 0 ? n.slice(i + 1) : n;
+  };
+
+  const dirname = (p: string) => {
+    const n = p.replace(/\\/g, "/");
+    const i = n.lastIndexOf("/");
+    return i >= 0 ? p.slice(0, i) : "";
+  };
+
+  const joinPath = (dir: string, name: string) => {
+    const sep = dir.includes("\\") ? "\\" : "/";
+    return dir.replace(/[\\/]+$/, "") + sep + name;
+  };
+
+  const refreshDir = async (dirPath: string) => {
+    if (!folderRoot) return;
+    try {
+      const children = await invoke("read_directory_children", {
+        path: dirPath,
+        root: folderRoot as string,
+      });
+      setDirTree((prev: any) => injectChildren(prev, dirPath, children as any));
+    } catch {}
+  };
+
+  const refreshParent = async (p: string) => {
+    const dir = dirname(p);
+    if (dir) await refreshDir(dir);
+  };
+
+  const commitRename = async (originalPath: string, newBase: string) => {
+    const dir = dirname(originalPath);
+    if (!dir || !newBase) return;
+    const sep = originalPath.includes("\\") ? "\\" : "/";
+    const newPath = dir.replace(/[\\/]+$/, "") + sep + newBase;
+    if (newPath === originalPath) return;
+    await invoke("move_path", { src: originalPath, dest: newPath });
+    await refreshParent(originalPath);
+    setOpenFiles((prev) =>
+      prev.map((f) =>
+        f.path === originalPath ? { path: newPath, name: newBase } : f,
+      ),
+    );
+    if ((fileHandle as any)?.metadata?.path === originalPath) {
+      const fh = await createTauriFileHandle(newPath);
+      setFileHandle(fh);
+      setWindowTitle(fh.metadata.name);
+      (window as any).__loadTotalLines = (fh.metadata as any)?.lineCount;
+    }
+  };
+
   useEffect(() => {
     const onOpen = (_e?: Event) => {
       (async () => {
@@ -313,6 +391,38 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCtxMenu(null);
+    };
+    if (ctxMenu) window.addEventListener("keydown", onKey);
+
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      unlisten = await listen<string[]>("tauri://file-drop", async (event) => {
+        const payload = event.payload;
+        if (!Array.isArray(payload)) return;
+        if (!folderRoot) return;
+        for (const droppedPath of payload) {
+          try {
+            const base = droppedPath.replace(/\\/g, "/").split("/").pop() || "";
+            const sep = folderRoot.includes("\\") ? "\\" : "/";
+            const dest = folderRoot.replace(/[\\/]+$/, "") + sep + base;
+            if (droppedPath !== dest) {
+              await invoke("copy_path", { src: droppedPath, dest });
+            }
+          } catch {}
+        }
+        await refreshDir(folderRoot);
+      });
+    })();
+
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (unlisten) unlisten();
+    };
+  }, [ctxMenu, folderRoot, refreshDir]);
+
   return (
     <MenuContext.Provider value={{ openTab, setOpenTab }}>
       <style>{`.icon-size svg{width:16px;height:16px;display:block}`}</style>
@@ -333,7 +443,6 @@ function App() {
               options={[
                 {
                   text: "About",
-
                   onClick: () => {
                     openUrl("https://github.com/oxums/load#load-editor");
                   },
@@ -341,11 +450,9 @@ function App() {
 
                 {
                   text: "Quit",
-
                   onClick: () => {
                     appWindow.close();
                   },
-
                   keybindSuggestion: "Ctrl+Q",
                 },
               ]}
@@ -428,29 +535,29 @@ function App() {
           </div>
 
           <div className="flex-1 flex justify-center pointer-events-none">
-            <span className="select-none text-xs c text-(--token-comments) flex items-center">
+            <span className="select-none text-sm c text-(--token-comments) flex items-center">
               {windowTitle}
             </span>
           </div>
-          <div className="flex items-center flex-row-reverse gap-2 px-2 select-none">
-            <button
-              className="w-[11.5px] h-[11.5px] rounded-full bg-red-500 border border-black/10 hover:bg-red-400 transition-colors"
+          <div className="h-11 rounded-t-lg bg-card flex justify-start items-center flex-row-reverse gap-1.5 px-3">
+            <span
+              className="w-3 h-3 rounded-full bg-[#FF736A] fine-border cursor-pointer hover:bg-red-500 transition-colors border-[1px]"
               aria-label="Close"
               onMouseDown={() => {
                 appWindow.close();
               }}
               tabIndex={-1}
             />
-            <button
-              className="w-[11.5px] h-[11.5px] rounded-full bg-yellow-400 border border-black/10 hover:bg-yellow-300 transition-colors"
+            <span
+              className="w-3 h-3 rounded-full bg-[#FEBC2E] fine-border cursor-pointer hover:bg-yellow-500 transition-colors"
               aria-label="Minimize"
               onMouseDown={() => {
                 appWindow.minimize();
               }}
               tabIndex={-1}
             />
-            <button
-              className="w-[11.5px] h-[11.5px] rounded-full bg-green-500 border border-black/10 hover:bg-green-400 transition-colors"
+            <span
+              className="w-3 h-3 rounded-full bg-[#19C332] fine-border cursor-pointer hover:bg-green-500 transition-colors"
               aria-label="Maximize"
               onMouseDown={() => {
                 appWindow.toggleMaximize();
@@ -481,7 +588,6 @@ function App() {
                         const isActive =
                           !isDir &&
                           (fileHandle as any)?.metadata?.path === node.path;
-
                         const onClick = async () => {
                           if (isDir) {
                             const next = !isExpanded;
@@ -513,37 +619,185 @@ function App() {
                             )?.lineCount;
                           }
                         };
-
                         return (
                           <div key={node.path}>
                             <button
-                              className="w-full text-left"
                               type="button"
+                              className="w-full text-left"
+                              draggable
+                              onDragStart={(
+                                e: DragEvent<HTMLButtonElement>,
+                              ) => {
+                                dragSourcePathRef.current = node.path;
+                                dragOverPathRef.current = null;
+                                setIsDragging(true);
+                                e.dataTransfer.setData(
+                                  "text/load-path",
+                                  node.path,
+                                );
+                                e.dataTransfer.effectAllowed = "move";
+                              }}
+                              onDragOver={(e: DragEvent<HTMLButtonElement>) => {
+                                if (isDir && isDragging) {
+                                  e.preventDefault();
+                                  e.dataTransfer.dropEffect = "move";
+                                  dragOverPathRef.current = node.path;
+                                }
+                              }}
+                              onDrop={async (
+                                e: DragEvent<HTMLButtonElement>,
+                              ) => {
+                                e.preventDefault();
+                                const src =
+                                  e.dataTransfer.getData("text/load-path");
+                                if (!src || src === node.path || !isDir) {
+                                  dragSourcePathRef.current = null;
+                                  dragOverPathRef.current = null;
+                                  setIsDragging(false);
+                                  return;
+                                }
+                                try {
+                                  const base =
+                                    src.replace(/\\/g, "/").split("/").pop() ||
+                                    "";
+                                  const sep = node.path.includes("\\")
+                                    ? "\\"
+                                    : "/";
+                                  const dest =
+                                    node.path.replace(/[\\/]+$/, "") +
+                                    sep +
+                                    base;
+                                  if (dest !== src) {
+                                    await invoke("move_path", { src, dest });
+                                    await refreshParent(src);
+                                    await refreshDir(node.path);
+                                  }
+                                } catch {
+                                } finally {
+                                  dragSourcePathRef.current = null;
+                                  dragOverPathRef.current = null;
+                                  setIsDragging(false);
+                                }
+                              }}
+                              onDragEnd={() => {
+                                dragSourcePathRef.current = null;
+                                dragOverPathRef.current = null;
+                                setIsDragging(false);
+                              }}
                               onMouseDown={(e) => {
+                                if (editingPath === node.path) {
+                                  e.stopPropagation();
+                                  return;
+                                }
+                                if (e.button !== 0) {
+                                  return;
+                                }
                                 e.preventDefault();
                                 onClick();
                               }}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                setCtxMenu({
+                                  x: e.clientX,
+                                  y: e.clientY,
+                                  path: node.path,
+                                  isDir,
+                                  name: node.name || "",
+                                });
+                              }}
                             >
                               <div
-                                className={`flex items-center gap-1 px-1 py-0.5 rounded ${gray} ${!isDir && (fileHandle as any)?.metadata?.path === node.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
+                                className={`flex items-center gap-1 px-1 py-[3px] rounded ${gray} ${isActive ? "bg-(--background-color) ring-1 ring-(--token-functions)" : ""} hover:bg-(--background-color)/70 transition-colors group`}
                               >
+                                {isDir ? (
+                                  <span
+                                    className={`inline-flex justify-center items-center w-3 shrink-0 transition-transform duration-150 ${isExpanded ? "rotate-90" : ""}`}
+                                  >
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                      className="c opacity-70 group-hover:opacity-100"
+                                    >
+                                      <polyline points="9 6 15 12 9 18" />
+                                    </svg>
+                                  </span>
+                                ) : (
+                                  <span className="w-3" />
+                                )}
                                 <span
-                                  className="inline-block c icon-size"
+                                  className="inline-block c icon-size pr-1"
                                   dangerouslySetInnerHTML={{
                                     __html: getIconSvg(node.name || "", isDir),
                                   }}
                                 />
-                                <span className="truncate">{node.name}</span>
+                                {editingPath === node.path ? (
+                                  <input
+                                    className="text-sm px-1 py-0.5 rounded bg-(--background-color) border border-(--token-functions)/40 w-full"
+                                    autoFocus
+                                    onMouseDown={(e) => e.stopPropagation()}
+                                    value={editingName}
+                                    onChange={(e) =>
+                                      setEditingName(e.target.value)
+                                    }
+                                    onBlur={async () => {
+                                      const trimmed = (
+                                        editingName || ""
+                                      ).trim();
+                                      if (trimmed && trimmed !== node.name) {
+                                        await commitRename(node.path, trimmed);
+                                      }
+                                      setEditingPath(null);
+                                    }}
+                                    onKeyDown={async (e) => {
+                                      if (e.key === "Enter") {
+                                        const trimmed = (
+                                          editingName || ""
+                                        ).trim();
+                                        if (trimmed && trimmed !== node.name) {
+                                          await commitRename(
+                                            node.path,
+                                            trimmed,
+                                          );
+                                        }
+                                        setEditingPath(null);
+                                      } else if (e.key === "Escape") {
+                                        setEditingPath(null);
+                                      }
+                                    }}
+                                  />
+                                ) : (
+                                  <span
+                                    className={`truncate text-sm ${isActive ? "font-medium" : ""}`}
+                                  >
+                                    {node.name}
+                                  </span>
+                                )}
                               </div>
                             </button>
                             {isDir &&
                             isExpanded &&
                             Array.isArray(node.children) &&
                             node.children.length > 0 ? (
-                              <div className="pl-3">
-                                {node.children.map((c: any) => (
-                                  <Node key={c.path} {...c} />
-                                ))}
+                              <div className="pl-3 border-l border-(--token-functions)/30 ml-[6px]">
+                                {[...(node.children || [])]
+                                  .sort((a: any, b: any) => {
+                                    if (!!a.isDir !== !!b.isDir)
+                                      return a.isDir ? -1 : 1;
+                                    return (a.name || "").localeCompare(
+                                      b.name || "",
+                                      undefined,
+                                      { sensitivity: "base" },
+                                    );
+                                  })
+                                  .map((c: any) => (
+                                    <Node key={c.path} {...c} />
+                                  ))}
                               </div>
                             ) : null}
                           </div>
@@ -564,13 +818,19 @@ function App() {
                       <div className="flex flex-col gap-1">
                         {outside.length > 0 ? (
                           <div className="mb-1">
-                            <div className="px-1 py-0.5 text-xs uppercase tracking-wide text-(--token-comments)">
-                              Open Outside
-                            </div>
                             {outside.map((f) => (
                               <button
                                 key={f.path}
                                 className="w-full text-left"
+                                draggable
+                                onDragStart={(
+                                  e: DragEvent<HTMLButtonElement>,
+                                ) => {
+                                  e.dataTransfer.setData(
+                                    "text/load-path",
+                                    f.path,
+                                  );
+                                }}
                                 onClick={async () => {
                                   const fh = await createTauriFileHandle(
                                     f.path,
@@ -581,17 +841,62 @@ function App() {
                                     fh.metadata as any
                                   )?.lineCount;
                                 }}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setCtxMenu({
+                                    x: e.clientX,
+                                    y: e.clientY,
+                                    path: f.path,
+                                    isDir: false,
+                                    name: f.name,
+                                  });
+                                }}
                               >
                                 <div
-                                  className={`flex items-center gap-1 px-1 py-0.5 rounded ${fileHandle?.metadata?.path === f.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
+                                  className={`flex items-center gap-1 px-1 py-[3px] rounded ${fileHandle?.metadata?.path === f.path ? "bg-(--background-color) ring-1 ring-(--token-functions)" : ""} hover:bg-(--background-color)/70 transition-colors`}
                                 >
                                   <span
-                                    className="inline-block c icon-size"
+                                    className="inline-block c icon-size pr-1"
                                     dangerouslySetInnerHTML={{
                                       __html: getIconSvg(f.name, false),
                                     }}
                                   />
-                                  <span className="truncate">{f.name}</span>
+                                  {editingPath === f.path ? (
+                                    <input
+                                      className="text-xs px-1 py-0.5 rounded bg-(--background-color) border border-(--token-functions)/40 w-full"
+                                      autoFocus
+                                      value={editingName}
+                                      onChange={(e) =>
+                                        setEditingName(e.target.value)
+                                      }
+                                      onBlur={async () => {
+                                        const trimmed = (
+                                          editingName || ""
+                                        ).trim();
+                                        if (trimmed && trimmed !== f.name) {
+                                          await commitRename(f.path, trimmed);
+                                        }
+                                        setEditingPath(null);
+                                      }}
+                                      onKeyDown={async (e) => {
+                                        if (e.key === "Enter") {
+                                          const trimmed = (
+                                            editingName || ""
+                                          ).trim();
+                                          if (trimmed && trimmed !== f.name) {
+                                            await commitRename(f.path, trimmed);
+                                          }
+                                          setEditingPath(null);
+                                        } else if (e.key === "Escape") {
+                                          setEditingPath(null);
+                                        }
+                                      }}
+                                    />
+                                  ) : (
+                                    <span className="truncate text-xs">
+                                      {f.name}
+                                    </span>
+                                  )}
                                 </div>
                               </button>
                             ))}
@@ -607,14 +912,23 @@ function App() {
               ) : (
                 <div className="p-1">
                   <div>
-                    <div className="px-1 py-0.5 text-xs uppercase tracking-wide text-(--token-comments)">
-                      Open Files
-                    </div>
                     {openFiles.length > 0 ? (
                       openFiles.map((f) => (
                         <button
                           key={f.path}
                           className="w-full text-left"
+                          draggable
+                          onDragStart={(e: DragEvent<HTMLButtonElement>) => {
+                            dragSourcePathRef.current = f.path;
+                            dragOverPathRef.current = null;
+                            setIsDragging(true);
+                            e.dataTransfer.setData("text/load-path", f.path);
+                          }}
+                          onDragEnd={() => {
+                            dragSourcePathRef.current = null;
+                            dragOverPathRef.current = null;
+                            setIsDragging(false);
+                          }}
                           onClick={async () => {
                             const fh = await createTauriFileHandle(f.path);
                             setFileHandle(fh);
@@ -623,17 +937,74 @@ function App() {
                               fh.metadata as any
                             )?.lineCount;
                           }}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            setCtxMenu({
+                              x: e.clientX,
+                              y: e.clientY,
+                              path: f.path,
+                              isDir: false,
+                              name: f.name,
+                            });
+                          }}
                         >
                           <div
-                            className={`flex items-center gap-1 px-1 py-0.5 rounded ${fileHandle?.metadata?.path === f.path ? "bg-(--background-color)" : ""} hover:bg-(--background-color)`}
+                            className={`flex items-center gap-1 px-1 py-[3px] rounded ${fileHandle?.metadata?.path === f.path ? "bg-(--background-color) ring-1 ring-(--token-functions)" : ""} hover:bg-(--background-color)/70 transition-colors`}
                           >
                             <span
-                              className="inline-block c icon-size"
+                              className="inline-block c icon-size pr-1"
                               dangerouslySetInnerHTML={{
                                 __html: getIconSvg(f.name, false),
                               }}
                             />
-                            <span className="truncate">{f.name}</span>
+                            {editingPath === f.path ? (
+                              <input
+                                className="text-sm px-1 py-0.5 rounded bg-(--background-color) border border-(--token-functions)/40 w-full"
+                                autoFocus
+                                value={editingName}
+                                onChange={(e) => setEditingName(e.target.value)}
+                                onBlur={async () => {
+                                  const trimmed = (editingName || "").trim();
+                                  if (trimmed && trimmed !== f.name) {
+                                    await commitRename(f.path, trimmed);
+                                  }
+                                  setEditingPath(null);
+                                }}
+                                onKeyDown={async (e) => {
+                                  if (e.key === "Enter") {
+                                    const trimmed = (editingName || "").trim();
+                                    if (trimmed && trimmed !== f.name) {
+                                      await commitRename(f.path, trimmed);
+                                    }
+                                    setEditingPath(null);
+                                  } else if (e.key === "Escape") {
+                                    setEditingPath(null);
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <span className="truncate text-sm">{f.name}</span>
+                            )}
+                            <button
+                              type="button"
+                              className="ml-1 text-[10px] px-1 py-0.5 rounded hover:bg-(--background-color) text-(--token-comments)"
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setOpenFiles((prev) =>
+                                  prev.filter((of) => of.path !== f.path),
+                                );
+                                if (
+                                  (fileHandle as any)?.metadata?.path === f.path
+                                ) {
+                                  setFileHandle(null);
+                                  setWindowTitle("");
+                                }
+                              }}
+                              aria-label="Close file"
+                            >
+                              ×
+                            </button>
                           </div>
                         </button>
                       ))
@@ -680,7 +1051,7 @@ function App() {
                 onMouseLeave={handleMenuMouseLeave}
               >
                 <div className="nice">
-                  <div className="c text-red-400">
+                  <div className="c text-red-400 hidden">
                     <svg
                       xmlns="http://www.w3.org/2000/svg"
                       width="1em"
@@ -694,10 +1065,10 @@ function App() {
                       />
                     </svg>
                   </div>
-                  <span className="text-xs select-none">0 Errors</span>
+                  <span className="text-xs select-none hidden">0 Errors</span>
                 </div>
                 <div className="nice">
-                  <div className="c text-yellow-400">
+                  <div className="c text-yellow-400 hidden">
                     <svg
                       xmlns="http://www.w3.org/2000/svg"
                       width="1em"
@@ -710,7 +1081,7 @@ function App() {
                       />
                     </svg>
                   </div>
-                  <span className="text-xs select-none">1 Warning</span>
+                  <span className="text-xs select-none hidden">1 Warning</span>
                 </div>
               </div>
             </div>
@@ -725,6 +1096,151 @@ function App() {
           </div>
         </div>
       </div>
+      {ctxMenu && (
+        <div
+          className="fixed inset-0 z-50"
+          onMouseDown={() => setCtxMenu(null)}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div className="absolute" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+            <div className="min-w-48 bg-(--background-secondary-color) border border-(--token-keywords) rounded-md p-1 shadow-lg">
+              <div className="flex flex-col gap-0.5">
+                <div className="hidden" />
+
+                <button
+                  className="w-full text-left px-2 py-1 rounded text-xs hover:bg-(--background-color) transition-colors"
+                  onMouseDown={async (e) => {
+                    e.preventDefault();
+
+                    try {
+                      await writeText("@" + ctxMenu.path);
+                    } catch {}
+                    setCtxMenu(null);
+                  }}
+                >
+                  Copy
+                </button>
+                <button
+                  className="w-full text-left px-2 py-1 rounded text-xs hover:bg-(--background-color) transition-colors"
+                  onMouseDown={async (e) => {
+                    e.preventDefault();
+                    try {
+                      const lower = ctxMenu.path.toLowerCase();
+                      if (
+                        lower.startsWith("c:\\windows") ||
+                        lower.startsWith("c:/windows")
+                      ) {
+                        return;
+                      }
+                      await writeText("!" + ctxMenu.path);
+                    } catch {}
+                    setCtxMenu(null);
+                  }}
+                >
+                  Cut
+                </button>
+
+                <button
+                  className="w-full text-left px-2 py-1 rounded text-xs hover:bg-(--background-color) transition-colors"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    const base =
+                      ctxMenu.path.replace(/\\/g, "/").split("/").pop() || "";
+                    setEditingPath(ctxMenu.path);
+                    setEditingName(base);
+                    setCtxMenu(null);
+                  }}
+                >
+                  Rename
+                </button>
+
+                <button
+                  className="w-full text-left px-2 py-1 rounded text-xs hover:bg-(--background-color) transition-colors"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    openPath(ctxMenu.path);
+                    setCtxMenu(null);
+                  }}
+                >
+                  Show in Explorer
+                </button>
+                {ctxMenu.isDir && (
+                  <button
+                    className="w-full text-left px-2 py-1 rounded text-xs hover:bg-(--background-color) transition-colors"
+                    onMouseDown={async (e) => {
+                      e.preventDefault();
+                      try {
+                        const clip = (await readText()) || "";
+                        if (!clip || clip.length < 2) return;
+                        const marker = clip[0];
+                        const src = clip.slice(1);
+                        const base =
+                          src.replace(/\\/g, "/").split("/").pop() || "";
+                        const sep = ctxMenu.path.includes("\\") ? "\\" : "/";
+                        const dest =
+                          ctxMenu.path.replace(/[\\/]+$/, "") + sep + base;
+                        if (marker === "@") {
+                          await invoke("copy_path", { src, dest });
+                          await refreshDir(ctxMenu.path);
+                        } else if (marker === "!") {
+                          const lower = src.toLowerCase();
+                          if (
+                            lower.startsWith("c:\\windows") ||
+                            lower.startsWith("c:/windows")
+                          ) {
+                            return;
+                          }
+                          await invoke("move_path", { src, dest });
+                          await writeText("");
+                          await refreshParent(src);
+                          await refreshDir(ctxMenu.path);
+                        } else {
+                          return;
+                        }
+                      } catch {}
+                      setCtxMenu(null);
+                    }}
+                  >
+                    Paste
+                  </button>
+                )}
+
+                <button
+                  className="w-full text-left px-2 py-1 rounded text-xs hover:bg-red-600/40 hover:text-red-300 transition-colors"
+                  onMouseDown={async (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    try {
+                      const name =
+                        ctxMenu.path.replace(/\\/g, "/").split("/").pop() ||
+                        ctxMenu.path;
+                      if (confirm(`Delete ${name}? This cannot be undone.`)) {
+                        await invoke("delete_path", { path: ctxMenu.path });
+                        await refreshParent(ctxMenu.path);
+                      }
+                    } catch {}
+
+                    setCtxMenu(null);
+                  }}
+                >
+                  Delete…
+                </button>
+
+                <div className="h-px bg-(--token-functions)/40 my-0.5" />
+                <button
+                  className="w-full text-left px-2 py-1 rounded text-xs hover:bg-(--background-color) transition-colors"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setCtxMenu(null);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </MenuContext.Provider>
   );
 }
