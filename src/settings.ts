@@ -40,6 +40,9 @@ const defaultValues = {
     enabled: true,
     mode: "char",
   },
+  autocomplete: {
+    inlineIdleMs: 500,
+  },
 };
 
 let cache = {

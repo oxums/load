@@ -42,6 +42,11 @@ import { log, logError } from "./logs";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText, readText } from "@tauri-apps/plugin-clipboard-manager";
+import {
+  generate_suggestions,
+  ai_inline_suggest,
+  autocompleteSuggestion,
+} from "./autocomplete";
 type Token = {
   startOffset: TokenOffset;
   endOffset: TokenOffset;
@@ -253,6 +258,21 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       })
       .catch(() => {});
   }, []);
+
+  // Autocomplete suggestion system
+  const [quickSuggestions, setQuickSuggestions] = useState<
+    autocompleteSuggestion[]
+  >([]);
+  const [quickSuggestionIndex, setQuickSuggestionIndex] = useState(0);
+  const [inlineSuggestion, setInlineSuggestion] = useState<string>("");
+  const [inlineSuggestionStartPos, setInlineSuggestionStartPos] = useState<{
+    row: number;
+    col: number;
+  } | null>(null);
+  const inlineIdleTimerRef = useRef<number | null>(null);
+  const quickSuggestAbortRef = useRef<AbortController | null>(null);
+  const inlineSuggestAbortRef = useRef<AbortController | null>(null);
+
   const autosave = {
     enabled: settings?.autosave?.enabled ?? true,
     intervalMs: settings?.autosave?.intervalMs ?? 0,
@@ -1071,10 +1091,153 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       fileHandle,
       sel,
       deleteSelection,
-      lastVisibleLine,
-      firstVisibleLine,
+      scheduleAutosave,
     ],
   );
+
+  // Autocomplete suggestion helpers
+  const cancelInlineSuggestion = useCallback(() => {
+    setInlineSuggestion("");
+    setInlineSuggestionStartPos(null);
+    if (inlineSuggestAbortRef.current) {
+      inlineSuggestAbortRef.current.abort();
+      inlineSuggestAbortRef.current = null;
+    }
+  }, []);
+
+  const cancelQuickSuggestions = useCallback(() => {
+    setQuickSuggestions([]);
+    setQuickSuggestionIndex(0);
+    if (quickSuggestAbortRef.current) {
+      quickSuggestAbortRef.current.abort();
+      quickSuggestAbortRef.current = null;
+    }
+  }, []);
+
+  const triggerQuickSuggestions = useCallback(
+    (row?: number, col?: number) => {
+      cancelQuickSuggestions();
+
+      const useRow = row ?? cursor.row;
+      const useCol = col ?? cursor.col;
+
+      const fileContent = buffer.lines.join("\n");
+      let cursorPosition = 0;
+      for (let i = 0; i < useRow; i++) {
+        cursorPosition += buffer.getLine(i).length + 1; // +1 for newline
+      }
+      cursorPosition += useCol;
+
+      const abortController = new AbortController();
+      quickSuggestAbortRef.current = abortController;
+
+      generate_suggestions(fileContent, cursorPosition, useRow)
+        .then((suggestions) => {
+          if (!abortController.signal.aborted) {
+            setQuickSuggestions(suggestions);
+            setQuickSuggestionIndex(0);
+          }
+        })
+        .catch(() => {
+          if (!abortController.signal.aborted) {
+            setQuickSuggestions([]);
+          }
+        });
+    },
+    [buffer, cursor, cancelQuickSuggestions],
+  );
+
+  const triggerInlineSuggestion = useCallback(
+    (row?: number, col?: number) => {
+      if (inlineSuggestAbortRef.current) {
+        inlineSuggestAbortRef.current.abort();
+      }
+
+      const useRow = row ?? cursor.row;
+      const useCol = col ?? cursor.col;
+
+      const fileContent = buffer.lines.join("\n");
+      let cursorPosition = 0;
+      for (let i = 0; i < useRow; i++) {
+        cursorPosition += buffer.getLine(i).length + 1;
+      }
+      cursorPosition += useCol;
+
+      const abortController = new AbortController();
+      inlineSuggestAbortRef.current = abortController;
+
+      ai_inline_suggest(fileContent, cursorPosition, useRow)
+        .then((suggestion) => {
+          if (!abortController.signal.aborted && suggestion) {
+            setInlineSuggestion(suggestion);
+            setInlineSuggestionStartPos({ row: useRow, col: useCol });
+          }
+        })
+        .catch(() => {
+          if (!abortController.signal.aborted) {
+            setInlineSuggestion("");
+            setInlineSuggestionStartPos(null);
+          }
+        });
+    },
+    [buffer, cursor],
+  );
+
+  const acceptInlineSuggestion = useCallback(() => {
+    if (inlineSuggestion && inlineSuggestionStartPos) {
+      // Calculate how much has already been typed
+      const currentLine = buffer.getLine(cursor.row);
+      const typedSoFar = currentLine.slice(
+        inlineSuggestionStartPos.col,
+        cursor.col,
+      );
+      // Only insert the remaining untyped portion
+      const remainingSuggestion = inlineSuggestion.slice(typedSoFar.length);
+      if (remainingSuggestion) {
+        insertText(remainingSuggestion);
+      }
+      cancelInlineSuggestion();
+    }
+  }, [
+    inlineSuggestion,
+    inlineSuggestionStartPos,
+    buffer,
+    cursor,
+    insertText,
+    cancelInlineSuggestion,
+  ]);
+
+  const acceptQuickSuggestion = useCallback(() => {
+    if (
+      quickSuggestions.length > 0 &&
+      quickSuggestionIndex < quickSuggestions.length
+    ) {
+      const selected = quickSuggestions[quickSuggestionIndex];
+      // Remove the already typed part
+      const line = buffer.getLine(cursor.row);
+      const before = line.slice(0, cursor.col);
+      const typedPart = selected.alreadyTyped;
+
+      // Check if the text before cursor ends with the already typed part
+      if (before.endsWith(typedPart)) {
+        const removeCount = typedPart.length;
+        deleteRange(cursor.row, cursor.col - removeCount, cursor.col);
+        moveCaret(cursor.row, cursor.col - removeCount);
+      }
+
+      insertText(selected.suggestion);
+      cancelQuickSuggestions();
+    }
+  }, [
+    quickSuggestions,
+    quickSuggestionIndex,
+    buffer,
+    cursor,
+    insertText,
+    cancelQuickSuggestions,
+    deleteRange,
+    moveCaret,
+  ]);
   const deleteBackward = useCallback(() => {
     if (sel) {
       deleteSelection();
@@ -1208,6 +1371,59 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       const ctrl = e.ctrlKey || e.metaKey;
       const shift = e.shiftKey;
       const isWord = (ch: string) => /[A-Za-z0-9_]/.test(ch);
+
+      // Handle Tab for suggestions
+      if (e.key === "Tab" && !ctrl && !shift) {
+        e.preventDefault();
+        // If inline suggestion is available, accept it
+        if (inlineSuggestion) {
+          acceptInlineSuggestion();
+          return;
+        }
+        // If quick suggestions available and no inline suggestion, accept quick suggestion
+        if (quickSuggestions.length > 0) {
+          acceptQuickSuggestion();
+          return;
+        }
+        // Otherwise, insert spaces (normal Tab behavior)
+        pushUndoSnapshot();
+        const insertion = "  ";
+        if (sel) deleteSelection();
+        insertText(insertion);
+        scheduleAutosave();
+        return;
+      }
+
+      // Handle Enter for quick suggestions
+      if (e.key === "Enter" && quickSuggestions.length > 0 && !ctrl && !shift) {
+        e.preventDefault();
+        acceptQuickSuggestion();
+        return;
+      }
+
+      // Handle Escape to cancel suggestions
+      if (e.key === "Escape") {
+        if (inlineSuggestion || quickSuggestions.length > 0) {
+          e.preventDefault();
+          cancelInlineSuggestion();
+          cancelQuickSuggestions();
+          return;
+        }
+      }
+
+      // Handle arrow keys for quick suggestions navigation
+      if (e.key === "ArrowDown" && quickSuggestions.length > 0 && !ctrl) {
+        e.preventDefault();
+        setQuickSuggestionIndex((prev) =>
+          prev < quickSuggestions.length - 1 ? prev + 1 : prev,
+        );
+        return;
+      }
+      if (e.key === "ArrowUp" && quickSuggestions.length > 0 && !ctrl) {
+        e.preventDefault();
+        setQuickSuggestionIndex((prev) => (prev > 0 ? prev - 1 : 0));
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
         e.preventDefault();
         const lastRow = Math.max(0, fileLineCount - 1);
@@ -1290,6 +1506,13 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       if (e.key === "ArrowLeft") {
         e.preventDefault();
         if (!ctrl) clearExtraCursors();
+        if (!quickSuggestions.length) {
+          cancelInlineSuggestion();
+          cancelQuickSuggestions();
+          if (inlineIdleTimerRef.current) {
+            window.clearTimeout(inlineIdleTimerRef.current);
+          }
+        }
         const newCol = ctrl ? prevWord(cursor.row, cursor.col) : cursor.col - 1;
         if (shift) {
           updateSelection(cursor.row, Math.max(0, newCol));
@@ -1302,6 +1525,13 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       if (e.key === "ArrowRight") {
         e.preventDefault();
         if (!ctrl) clearExtraCursors();
+        if (!quickSuggestions.length) {
+          cancelInlineSuggestion();
+          cancelQuickSuggestions();
+          if (inlineIdleTimerRef.current) {
+            window.clearTimeout(inlineIdleTimerRef.current);
+          }
+        }
         const newCol = ctrl ? nextWord(cursor.row, cursor.col) : cursor.col + 1;
         if (shift) {
           updateSelection(cursor.row, newCol);
@@ -1314,6 +1544,13 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       if (e.key === "ArrowUp") {
         e.preventDefault();
         if (!ctrl) clearExtraCursors();
+        if (!quickSuggestions.length) {
+          cancelInlineSuggestion();
+          cancelQuickSuggestions();
+          if (inlineIdleTimerRef.current) {
+            window.clearTimeout(inlineIdleTimerRef.current);
+          }
+        }
         const newRow = cursor.row - 1;
         if (shift) {
           updateSelection(Math.max(0, newRow), cursor.col);
@@ -1326,6 +1563,13 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         if (!ctrl) clearExtraCursors();
+        if (!quickSuggestions.length) {
+          cancelInlineSuggestion();
+          cancelQuickSuggestions();
+          if (inlineIdleTimerRef.current) {
+            window.clearTimeout(inlineIdleTimerRef.current);
+          }
+        }
         const newRow = cursor.row + 1;
         if (shift) {
           updateSelection(Math.min(fileLineCount - 1, newRow), cursor.col);
@@ -1408,6 +1652,11 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       if (e.key === "Backspace") {
         e.preventDefault();
         pushUndoSnapshot();
+        cancelInlineSuggestion();
+        cancelQuickSuggestions();
+        if (inlineIdleTimerRef.current) {
+          window.clearTimeout(inlineIdleTimerRef.current);
+        }
         if (sel) {
           deleteSelection();
         } else {
@@ -1420,29 +1669,65 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       if (e.key === "Enter") {
         e.preventDefault();
         pushUndoSnapshot();
+        cancelInlineSuggestion();
+        cancelQuickSuggestions();
+        if (inlineIdleTimerRef.current) {
+          window.clearTimeout(inlineIdleTimerRef.current);
+        }
         if (sel) deleteSelection();
         insertNewLine();
         setSel(null);
         scheduleAutosave();
         return;
       }
-      if (e.key === "Tab") {
-        e.preventDefault();
-        pushUndoSnapshot();
-        const insertion = "  ";
-        if (sel) deleteSelection();
-        insertText(insertion);
-        scheduleAutosave();
-        return;
-      }
       if (isPrintableKey(e.nativeEvent)) {
         pushUndoSnapshot();
         const ch = e.key;
+
+        // Check if typing matches inline suggestion
+        if (inlineSuggestion && inlineSuggestionStartPos) {
+          // Check if cursor is still at the suggestion position
+          if (
+            cursor.row === inlineSuggestionStartPos.row &&
+            cursor.col >= inlineSuggestionStartPos.col
+          ) {
+            const currentLine = buffer.getLine(cursor.row);
+            const typedSoFar = currentLine.slice(
+              inlineSuggestionStartPos.col,
+              cursor.col,
+            );
+            const nextChar = inlineSuggestion.charAt(typedSoFar.length);
+
+            if (ch !== nextChar) {
+              // User typed something different, cancel suggestion
+              cancelInlineSuggestion();
+            }
+            // If it matches, keep the suggestion and update the display after insert
+          } else {
+            // Cursor moved away from suggestion start
+            cancelInlineSuggestion();
+          }
+        }
+
         if (sel) deleteSelection();
         insertText(ch);
         setSel(null);
         scheduleAutosave();
         e.preventDefault();
+
+        // Trigger quick suggestions immediately with new cursor position
+        const newCol = cursor.col + ch.length;
+        triggerQuickSuggestions(cursor.row, newCol);
+
+        // Clear and restart inline suggestion timer
+        if (inlineIdleTimerRef.current) {
+          window.clearTimeout(inlineIdleTimerRef.current);
+        }
+        const inlineIdleMs = settings?.autocomplete?.inlineIdleMs ?? 300;
+        inlineIdleTimerRef.current = window.setTimeout(() => {
+          triggerInlineSuggestion(cursor.row, newCol);
+        }, inlineIdleMs);
+
         return;
       }
       if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
@@ -1469,8 +1754,19 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       pushUndoSnapshot,
       undo,
       redo,
+      inlineSuggestion,
+      inlineSuggestionStartPos,
+      quickSuggestions,
+      acceptInlineSuggestion,
+      acceptQuickSuggestion,
+      cancelInlineSuggestion,
+      cancelQuickSuggestions,
+      triggerQuickSuggestions,
+      triggerInlineSuggestion,
+      settings,
     ],
   );
+
   const handleContainerClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
       if (!containerRef.current) return;
@@ -1506,6 +1802,11 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       clearExtraCursors();
       setSel(null);
       moveCaret(line, col);
+      cancelInlineSuggestion();
+      cancelQuickSuggestions();
+      if (inlineIdleTimerRef.current) {
+        window.clearTimeout(inlineIdleTimerRef.current);
+      }
       hiddenInputRef.current?.focus();
     },
     [
@@ -1522,6 +1823,8 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       fileLineCount,
       segmentToLine,
       buffer,
+      cancelInlineSuggestion,
+      cancelQuickSuggestions,
     ],
   );
   useEffect(() => {
@@ -2236,6 +2539,136 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           </button>
         </div>
       )}
+
+      {/* Quick Suggestions Dropdown */}
+      {quickSuggestions.length > 0 &&
+        (() => {
+          let visualRow = cursor.row;
+          let visualCol = cursor.col;
+
+          const wrappedReady =
+            wrapEnabled &&
+            wrapCols > 0 &&
+            prefixSegments.length === fileLineCount + 1;
+
+          if (wrappedReady) {
+            if (wrapMode === "word") {
+              const starts = segmentStarts[cursor.row] || [0];
+              let segIndex = 0;
+              for (let i = 0; i < starts.length; i++) {
+                if (starts[i] <= cursor.col) segIndex = i;
+                else break;
+              }
+              const segStart = starts[segIndex] ?? 0;
+              visualRow = prefixSegments[cursor.row] + segIndex;
+              visualCol = cursor.col - segStart;
+            } else {
+              const segIndex = Math.floor(cursor.col / (wrapCols || 1));
+              visualRow = prefixSegments[cursor.row] + segIndex;
+              visualCol = cursor.col % (wrapCols || 1);
+            }
+          }
+
+          return (
+            <div
+              className="absolute z-50 bg-(--background-secondary-color) border border-(--token-keywords) rounded shadow-lg"
+              style={{
+                top: (visualRow + 1) * lineHeightPx - scrollTop + "px",
+                left: visualCol * charWidthPx + gutterPx + "px",
+                maxHeight: "200px",
+                overflowY: "auto",
+                minWidth: "200px",
+              }}
+            >
+              {quickSuggestions.map((sugg, idx) => (
+                <div
+                  key={idx}
+                  className={`px-3 py-1.5 cursor-pointer text-sm ${
+                    idx === quickSuggestionIndex
+                      ? "bg-(--background-accent-color)"
+                      : "hover:bg-(--background-color)"
+                  }`}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setQuickSuggestionIndex(idx);
+                    acceptQuickSuggestion();
+                  }}
+                  onMouseEnter={() => setQuickSuggestionIndex(idx)}
+                >
+                  <span
+                    style={{ color: "var(--token-comments)", opacity: 0.7 }}
+                  >
+                    {sugg.alreadyTyped}
+                  </span>
+                  <span style={{ color: "var(--token-functions)" }}>
+                    {sugg.suggestion}
+                  </span>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+
+      {/* Inline AI Suggestion */}
+      {inlineSuggestion &&
+        inlineSuggestionStartPos &&
+        (() => {
+          // Calculate how much has already been typed
+          const currentLine = buffer.getLine(cursor.row);
+          const typedSoFar = currentLine.slice(
+            inlineSuggestionStartPos.col,
+            cursor.col,
+          );
+          // Only show the remaining untyped portion
+          const remainingSuggestion = inlineSuggestion.slice(typedSoFar.length);
+
+          if (!remainingSuggestion) return null;
+
+          // Calculate visual position accounting for wrapping
+          let visualRow = cursor.row;
+          let visualCol = cursor.col;
+
+          const wrappedReady =
+            wrapEnabled &&
+            wrapCols > 0 &&
+            prefixSegments.length === fileLineCount + 1;
+
+          if (wrappedReady) {
+            if (wrapMode === "word") {
+              const starts = segmentStarts[cursor.row] || [0];
+              let segIndex = 0;
+              for (let i = 0; i < starts.length; i++) {
+                if (starts[i] <= cursor.col) segIndex = i;
+                else break;
+              }
+              const segStart = starts[segIndex] ?? 0;
+              visualRow = prefixSegments[cursor.row] + segIndex;
+              visualCol = cursor.col - segStart;
+            } else {
+              const segIndex = Math.floor(cursor.col / (wrapCols || 1));
+              visualRow = prefixSegments[cursor.row] + segIndex;
+              visualCol = cursor.col % (wrapCols || 1);
+            }
+          }
+
+          return (
+            <div
+              className="absolute pointer-events-none"
+              style={{
+                top: visualRow * lineHeightPx - scrollTop + "px",
+                left: visualCol * charWidthPx + gutterPx + "px",
+                fontFamily: "var(--editor-font-family)",
+                fontSize: "var(--editor-font-size)",
+                lineHeight: lineHeightPx + "px",
+                color: "var(--token-comments)",
+                opacity: 0.6,
+                whiteSpace: "pre",
+              }}
+            >
+              {remainingSuggestion}
+            </div>
+          );
+        })()}
     </div>
   );
 }
