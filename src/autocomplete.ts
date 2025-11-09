@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getSettings } from "./settings";
 
 export type autocompleteSuggestion = {
   alreadyTyped: string;
@@ -298,5 +299,39 @@ export async function ai_inline_suggest(
   cursorPosition: number,
   line: number,
 ): Promise<string> {
-  return "";
+  const lines = fileContent.split("\n");
+  const currentLineText = lines[line] || "";
+  const cursorIdxInLine = cursorPosition - (fileContent.lastIndexOf("\n", cursorPosition - 1) + 1);
+  const afterCursor = currentLineText.slice(cursorIdxInLine);
+  if (afterCursor.trim().length > 0) {
+    return "";
+  }
+  
+  const settings = await getSettings();
+  
+  if (!settings.inline_autocomplete) {
+    return "";
+  }
+  
+  const context = (() => {
+    const lines = fileContent.split("\n");
+    const currentLineIdx = line;
+    const startLine = Math.max(0, currentLineIdx - settings.inline_context_lines);
+    const contextLines = lines.slice(startLine, currentLineIdx + 1);
+    if (contextLines.length > 0) {
+      const lastLineIdx = contextLines.length - 1;
+      const cursorIdxInLine = cursorPosition - (fileContent.lastIndexOf("\n", cursorPosition - 1) + 1);
+      contextLines[lastLineIdx] = contextLines[lastLineIdx].slice(0, cursorIdxInLine);
+    }
+    return contextLines.join("\n");
+  })()
+  
+  const response = await invoke<string>("ollama_generate", {
+    model: settings.ai,
+    prompt: "Generate a short continuation for the code, only output the continuation DONT ADD any explanations. Code: " + context,
+  })
+  
+  console.log("Inline suggestion response: " + response)
+  
+  return response.replace("```python", '').replace("```javascript", '').replace("```ts", '').replace("```tsx", '').replace("```js", '').replace("```go", '').replace("```rs", '').replace("```c", '').replace("```cpp", '').replace("```", "").trim();
 }

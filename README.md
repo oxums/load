@@ -13,8 +13,10 @@ Copilot AI was used in the development mainly for boilerplate code / boring task
 
 ## todo
 
-- hide error / warnings
-- improve file tree UI
 - general polish
-- settings button
-- AI integration (ollama or something)
+- AI integration (to be finished)
+
+# known issues
+
+- adding newline at the end of file makes view jump up
+- viewport dosent follow cursor

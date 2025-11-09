@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+mod ai;
 mod pools;
 mod task;
 
@@ -66,10 +67,15 @@ struct InitialPathInfo {
 
 #[tauri::command]
 fn get_initial_path(state: State<InitialPath>) -> Option<InitialPathInfo> {
-    state.0.lock().unwrap().as_ref().map(|(path, is_dir)| InitialPathInfo {
-        path: path.clone(),
-        is_directory: *is_dir,
-    })
+    state
+        .0
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(path, is_dir)| InitialPathInfo {
+            path: path.clone(),
+            is_directory: *is_dir,
+        })
 }
 
 #[tauri::command]
@@ -797,16 +803,12 @@ fn open_settings() {
 }
 
 pub fn run() {
-    // Get command-line arguments
     let args: Vec<String> = std::env::args().collect();
     let initial_path_state = InitialPath::default();
-
-    // If there's a second argument (first is the exe path), treat it as a file path
     if args.len() > 1 {
         let arg_path = &args[1];
         println!("CLI argument provided: {}", arg_path);
 
-        // Convert relative path to absolute path based on current directory
         let path = if Path::new(arg_path).is_absolute() {
             PathBuf::from(arg_path)
         } else {
@@ -828,7 +830,10 @@ pub fn run() {
                 path_str = path_str[4..].to_string();
             }
 
-            println!("Storing initial path: {} (is_directory: {})", path_str, is_directory);
+            println!(
+                "Storing initial path: {} (is_directory: {})",
+                path_str, is_directory
+            );
             *initial_path_state.0.lock().unwrap() = Some((path_str, is_directory));
         } else {
             println!("Path does not exist, not storing");
@@ -860,7 +865,11 @@ pub fn run() {
             copy_path,
             move_path,
             delete_path,
-            open_settings
+            open_settings,
+            ai::ollama_available,
+            ai::ollama_model_is_downloaded,
+            ai::ollama_pull_model,
+            ai::ollama_generate
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

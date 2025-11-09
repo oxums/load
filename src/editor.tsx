@@ -217,6 +217,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   >(new Map());
   const pendingScrollTopRef = useRef(0);
   const scrollRafRef = useRef<number | null>(null);
+
   // Tokenization request batching / debouncing
   const tokenRequestDebounceRef = useRef<number | null>(null);
   const tokenReqPendingRef = useRef<{ start: number; end: number } | null>(
@@ -1063,18 +1064,82 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       if (sel) {
         deleteSelection();
       }
-      const line = buffer.getLine(cursor.row);
-      const before = line.slice(0, cursor.col);
-      const after = line.slice(cursor.col);
-      const updated = before + text + after;
-      buffer.setLine(cursor.row, updated);
-      fileHandle.writeLine(cursor.row, updated);
-      moveCaret(cursor.row, cursor.col + text.length);
-      setLineVersions((prev) => {
-        const m = new Map(prev);
-        m.set(cursor.row, (m.get(cursor.row) ?? 0) + 1);
-        return m;
-      });
+
+      // Handle multiline text (suggestions with newlines)
+      if (text.includes("\n")) {
+        const lines = text.split("\n");
+        const line = buffer.getLine(cursor.row);
+        const before = line.slice(0, cursor.col);
+        const after = line.slice(cursor.col);
+
+        // First line: before + first part of suggestion
+        buffer.setLine(cursor.row, before + lines[0]);
+        fileHandle.writeLine(cursor.row, before + lines[0]);
+
+        // Middle lines: insert new lines
+        let currentRow = cursor.row;
+        for (let i = 1; i < lines.length - 1; i++) {
+          currentRow++;
+          buffer.insertLine(currentRow, lines[i]);
+          invoke("insert_line", { num: currentRow, content: lines[i] }).catch(
+            (e) => logError("insert_line failed " + (e as Error).message),
+          );
+        }
+
+        // Last line: last part of suggestion + after
+        currentRow++;
+        const lastLineContent = lines[lines.length - 1] + after;
+        buffer.insertLine(currentRow, lastLineContent);
+        invoke("insert_line", {
+          num: currentRow,
+          content: lastLineContent,
+        }).catch((e) => logError("insert_line failed " + (e as Error).message));
+
+        // Update file line count and cursor position
+        const linesAdded = lines.length - 1;
+        setFileLineCount((c) => c + linesAdded);
+        moveCaret(currentRow, lines[lines.length - 1].length);
+
+        // Update line versions for all affected lines
+        setLineVersions((prev) => {
+          const m = new Map(prev);
+          for (let i = cursor.row; i <= currentRow; i++) {
+            m.set(i, (m.get(i) ?? 0) + 1);
+          }
+          return m;
+        });
+
+        // Update token pool to shift tokens for inserted lines
+        setTokenPool((prev) => {
+          const m = new Map<number, { version: number; tokens: Token[] }>();
+          prev.forEach((val, lineNum) => {
+            if (lineNum < cursor.row) {
+              m.set(lineNum, val);
+            } else {
+              m.set(lineNum + linesAdded, val);
+            }
+          });
+          // Clear tokens for affected lines
+          for (let i = cursor.row; i <= currentRow; i++) {
+            m.delete(i);
+          }
+          return m;
+        });
+      } else {
+        // Single-line text insertion (original behavior)
+        const line = buffer.getLine(cursor.row);
+        const before = line.slice(0, cursor.col);
+        const after = line.slice(cursor.col);
+        const updated = before + text + after;
+        buffer.setLine(cursor.row, updated);
+        fileHandle.writeLine(cursor.row, updated);
+        moveCaret(cursor.row, cursor.col + text.length);
+        setLineVersions((prev) => {
+          const m = new Map(prev);
+          m.set(cursor.row, (m.get(cursor.row) ?? 0) + 1);
+          return m;
+        });
+      }
       scheduleAutosave();
     },
     [
@@ -1124,7 +1189,12 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       const abortController = new AbortController();
       quickSuggestAbortRef.current = abortController;
 
-      generate_suggestions(fileContent, cursorPosition, useRow, fileHandle.metadata.name)
+      generate_suggestions(
+        fileContent,
+        cursorPosition,
+        useRow,
+        fileHandle.metadata.name,
+      )
         .then((suggestions) => {
           console.log("Received quick suggestions:", suggestions);
           if (!abortController.signal.aborted) {
@@ -1300,6 +1370,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     const line = buffer.getLine(cursor.row);
     const before = line.slice(0, cursor.col);
     const after = line.slice(cursor.col);
+    const insertRow = cursor.row;
     buffer.setLine(cursor.row, before);
     buffer.insertLine(cursor.row + 1, after);
     fileHandle.writeLine(cursor.row, before);
@@ -1308,8 +1379,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     );
     const newRow = cursor.row + 1;
     setFileLineCount((c) => c + 1);
-    setCursor({ row: newRow, col: 0 });
-    const insertRow = cursor.row;
+    moveCaret(newRow, 0);
     setTokenPool((prev) => {
       const m = new Map<number, { version: number; tokens: Token[] }>();
       prev.forEach((val, line) => {
@@ -1607,7 +1677,10 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         e.preventDefault();
         pushUndoSnapshot();
         const isForward = e.key === "Delete";
-        if (sel) {
+        const hasRangeSel =
+          !!sel &&
+          !(sel.startRow === sel.endRow && sel.startCol === sel.endCol);
+        if (hasRangeSel) {
           deleteSelection();
           scheduleAutosave();
           return;
@@ -1639,7 +1712,10 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         if (inlineIdleTimerRef.current) {
           window.clearTimeout(inlineIdleTimerRef.current);
         }
-        if (sel) {
+        const hasRangeSel =
+          !!sel &&
+          !(sel.startRow === sel.endRow && sel.startCol === sel.endCol);
+        if (hasRangeSel) {
           deleteSelection();
         } else {
           deleteBackward();
@@ -1933,6 +2009,164 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     wrapMode,
     segmentStarts,
   ]);
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Compute visual caret row/col accounting for wrapping
+    let visualRow = cursor.row;
+
+    const wrappedReady =
+      wrapEnabled &&
+      wrapCols > 0 &&
+      prefixSegments.length === fileLineCount + 1;
+
+    if (wrappedReady) {
+      if (wrapMode === "word") {
+        const starts = segmentStarts[cursor.row] || [0];
+        let segIndex = 0;
+        for (let i = 0; i < starts.length; i++) {
+          if (starts[i] <= cursor.col) segIndex = i;
+          else break;
+        }
+        visualRow = (prefixSegments[cursor.row] || 0) + segIndex;
+      } else {
+        const segIndex = Math.floor(cursor.col / (wrapCols || 1));
+        visualRow = (prefixSegments[cursor.row] || 0) + segIndex;
+      }
+    }
+
+    const caretTop = visualRow * lineHeightPx;
+    const caretBottom = caretTop + lineHeightPx;
+    const viewTop = pendingScrollTopRef.current;
+    const viewBottom = viewTop + viewportHeight;
+    const margin = Math.max(lineHeightPx, 8) * 2;
+
+    let nextScrollTop = viewTop;
+    if (caretTop < viewTop + margin) {
+      nextScrollTop = Math.max(0, caretTop - margin);
+    } else if (caretBottom > viewBottom - margin) {
+      nextScrollTop = Math.min(
+        Math.max(0, caretBottom + margin - viewportHeight),
+        Math.max(0, totalHeight - viewportHeight),
+      );
+    }
+
+    if (nextScrollTop !== viewTop) {
+      container.scrollTop = nextScrollTop;
+      pendingScrollTopRef.current = nextScrollTop;
+      if (scrollRafRef.current == null) {
+        scrollRafRef.current = requestAnimationFrame(() => {
+          scrollRafRef.current = null;
+          setScrollTop(pendingScrollTopRef.current);
+        });
+      }
+    }
+  }, [
+    cursor,
+    lineHeightPx,
+    viewportHeight,
+    wrapEnabled,
+    wrapCols,
+    prefixSegments,
+    fileLineCount,
+    wrapMode,
+    segmentStarts,
+    totalHeight,
+  ]);
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Compute visual caret row/col accounting for wrapping
+    let visualRow = cursor.row;
+    let visualCol = cursor.col;
+
+    const wrappedReady =
+      wrapEnabled &&
+      wrapCols > 0 &&
+      prefixSegments.length === fileLineCount + 1;
+
+    if (wrappedReady) {
+      if (wrapMode === "word") {
+        const starts = segmentStarts[cursor.row] || [0];
+        let segIndex = 0;
+        for (let i = 0; i < starts.length; i++) {
+          if (starts[i] <= cursor.col) segIndex = i;
+          else break;
+        }
+        const segStart = starts[segIndex] ?? 0;
+        visualRow = (prefixSegments[cursor.row] || 0) + segIndex;
+        visualCol = cursor.col - segStart;
+      } else {
+        const segIndex = Math.floor(cursor.col / (wrapCols || 1));
+        visualRow = (prefixSegments[cursor.row] || 0) + segIndex;
+        visualCol = cursor.col % (wrapCols || 1);
+      }
+    }
+
+    // Keep caret vertically visible with margin
+    const caretTop = visualRow * lineHeightPx;
+    const caretBottom = caretTop + lineHeightPx;
+    const viewTop = pendingScrollTopRef.current;
+    const viewBottom = viewTop + viewportHeight;
+    const vMargin = Math.max(lineHeightPx, 8) * 2;
+
+    let nextScrollTop = viewTop;
+    if (caretTop < viewTop + vMargin) {
+      nextScrollTop = Math.max(0, caretTop - vMargin);
+    } else if (caretBottom > viewBottom - vMargin) {
+      nextScrollTop = Math.min(
+        Math.max(0, caretBottom + vMargin - viewportHeight),
+        Math.max(0, totalHeight - viewportHeight),
+      );
+    }
+
+    // Keep caret horizontally visible with margin
+    const caretLeft = gutterPx + visualCol * charWidthPx;
+    const caretRight = caretLeft + Math.max(charWidthPx, 1);
+    const viewLeft = container.scrollLeft;
+    const viewRight = viewLeft + container.clientWidth;
+    const hMargin = Math.max(Math.round(charWidthPx * 4), 16);
+
+    let nextScrollLeft = viewLeft;
+    if (caretLeft < viewLeft + hMargin) {
+      nextScrollLeft = Math.max(0, caretLeft - hMargin);
+    } else if (caretRight > viewRight - hMargin) {
+      nextScrollLeft = Math.min(
+        Math.max(0, caretRight + hMargin - container.clientWidth),
+        Math.max(0, container.scrollWidth - container.clientWidth),
+      );
+    }
+
+    // Apply scrolling
+    if (nextScrollTop !== viewTop) {
+      container.scrollTop = nextScrollTop;
+      pendingScrollTopRef.current = nextScrollTop;
+      if (scrollRafRef.current == null) {
+        scrollRafRef.current = requestAnimationFrame(() => {
+          scrollRafRef.current = null;
+          setScrollTop(pendingScrollTopRef.current);
+        });
+      }
+    }
+    if (nextScrollLeft !== viewLeft) {
+      container.scrollLeft = nextScrollLeft;
+    }
+  }, [
+    cursor,
+    lineHeightPx,
+    charWidthPx,
+    gutterPx,
+    viewportHeight,
+    totalHeight,
+    wrapEnabled,
+    wrapCols,
+    prefixSegments,
+    fileLineCount,
+    wrapMode,
+    segmentStarts,
+  ]);
   const renderLineTokens = useCallback(
     (lineNumber: number, startCol: number, endCol: number) => {
       const version = lineVersions.get(lineNumber) ?? 0;
@@ -2110,19 +2344,26 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   return (
     <div
       className="w-full h-full relative overflow-hidden editor-styling"
-      onClick={(e) => {
+      style={{ cursor: "text" }}
+      onMouseDown={(e) => {
         setContextMenu(null);
+
         if (suppressNextClickRef.current) {
           suppressNextClickRef.current = false;
+
           return;
         }
+
         handleContainerClick(e);
       }}
     >
       <div
         ref={containerRef}
         className="absolute inset-0 overflow-auto scroll-thin s"
-        style={{ background: "var(--background-secondary-color)" }}
+        style={{
+          background: "var(--background-secondary-color)",
+          cursor: "text",
+        }}
         onScroll={(e) => {
           setContextMenu(null);
 
@@ -2281,12 +2522,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                     } else {
                       clearExtraCursors();
                       dragAnchorRef.current = { row: ln, col };
-                      setSel({
-                        startRow: ln,
-                        startCol: col,
-                        endRow: ln,
-                        endCol: col,
-                      });
+                      setSel(null);
                       moveCaret(ln, col);
                     }
                     hiddenInputRef.current?.focus();
@@ -2364,10 +2600,15 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           height: 0,
         }}
         onBlur={() => {
-          hiddenInputRef.current?.focus();
+          // Defer refocus so the click can complete; avoids swallowing the first key after click
+          window.setTimeout(() => {
+            hiddenInputRef.current?.focus();
+          }, 0);
         }}
         onKeyDown={(e) => {
           handleKeyDown(e);
+        }}
+        onInput={() => {
           if (hiddenInputRef.current) hiddenInputRef.current.value = "";
         }}
       />

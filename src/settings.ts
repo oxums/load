@@ -41,8 +41,11 @@ const defaultValues = {
     mode: "char",
   },
   autocomplete: {
-    inlineIdleMs: 500,
+    inlineIdleMs: 800,
   },
+  ai: "qwen2.5-coder:1.5b",
+  inline_autocomplete: true,
+  inline_context_lines: 5,
 };
 
 let cache = {

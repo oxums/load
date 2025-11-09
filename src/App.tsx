@@ -21,6 +21,7 @@ import { listen } from "@tauri-apps/api/event";
 import { createTauriFileHandle } from "./editor";
 import { getIconSvg } from "./icon";
 import { writeText, readText } from "@tauri-apps/plugin-clipboard-manager";
+import { isAIStatusModalOpen } from "./main";
 
 const MenuContext = createContext<{
   openTab: string | null;
@@ -150,7 +151,7 @@ function WindowUpperMenuTab({
   );
 }
 
-function App() {
+function App({ setAIModal }: { setAIModal: (open: boolean) => void }) {
   const appWindow = getCurrentWindow();
 
   const [windowTitle, setWindowTitle] = useState("");
@@ -500,6 +501,12 @@ function App() {
                   text: "Open settings",
                   onClick: () => {
                     invoke("open_settings");
+                  },
+                },
+                {
+                  text: "Open AI settings",
+                  onClick: () => {
+                    setAIModal(true);
                   },
                 },
                 {

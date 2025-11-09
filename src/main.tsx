@@ -1,4 +1,9 @@
-import React, { KeyboardEvent, useEffect } from "react";
+import React, {
+  createContext,
+  KeyboardEvent,
+  useContext,
+  useEffect,
+} from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./global.css";
@@ -7,6 +12,7 @@ import { setCSSvar } from "./utils";
 import { getSettings } from "./settings";
 import { globalKeybinds } from "./keybinds";
 import { invoke } from "@tauri-apps/api/core";
+import { AIStatus } from "./aistatus";
 
 async function applyTheme() {
   const settings = await getSettings();
@@ -76,8 +82,15 @@ function AppLoader() {
       window.removeEventListener("keydown", handleGlobalKeybinds);
     };
   });
+  
+  const [aiModalOpen, setAIModalOpen] = React.useState(false);
 
-  return <>{isLoaded ? <App /> : <Loading />}</>;
+  return (
+    <>
+      {isLoaded ? <App setAIModal={setAIModalOpen} /> : <Loading />}
+      {aiModalOpen && <AIStatus setAIModal={setAIModalOpen} />}
+    </>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
