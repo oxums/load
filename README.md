@@ -13,10 +13,4 @@ Copilot AI was used in the development mainly for boilerplate code / boring task
 
 ## todo
 
-- general polish
-- AI integration (to be finished)
-
-# known issues
-
-- adding newline at the end of file makes view jump up
-- viewport dosent follow cursor
+- general polishing
