@@ -229,6 +229,45 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    const checkInitialPath = async () => {
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        const initialPathInfo = await invoke<{
+          path: string;
+          isDirectory: boolean;
+        } | null>("get_initial_path");
+        console.log("Initial path from CLI:", initialPathInfo);
+
+        if (initialPathInfo) {
+          if (initialPathInfo.isDirectory) {
+            // Open as folder
+            console.log("Opening directory:", initialPathInfo.path);
+            const tree = await invoke("read_directory_root", {
+              path: initialPathInfo.path,
+            });
+            setDirTree(tree as any);
+            setFolderRoot(initialPathInfo.path);
+            setExpanded((e) => ({ ...e, [initialPathInfo.path]: true }));
+          } else if (!fileHandle) {
+            // Open as file
+            console.log("Opening file:", initialPathInfo.path);
+            await openFilePath(initialPathInfo.path);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to open initial path:", error);
+        if (error && typeof error === "object" && "message" in error) {
+          console.error("Error details:", error);
+        }
+      }
+    };
+
+    const timer = setTimeout(checkInitialPath, 200);
+    return () => clearTimeout(timer);
+  }, []);
+
   const renderNode = (node: any) => {
     const isDir = !!node.isDir;
     const isExpanded = expanded[node.path] ?? node.path === folderRoot;
@@ -392,6 +431,22 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      unlisten = await listen<string>("queue-file-open", async (event) => {
+        const filePath = event.payload;
+        if (typeof filePath === "string") {
+          await openFilePath(filePath);
+        }
+      });
+    })();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setCtxMenu(null);
     };
@@ -442,12 +497,17 @@ function App() {
               name="Load"
               options={[
                 {
+                  text: "Open settings",
+                  onClick: () => {
+                    invoke("open_settings");
+                  },
+                },
+                {
                   text: "About",
                   onClick: () => {
                     openUrl("https://github.com/oxums/load#load-editor");
                   },
                 },
-
                 {
                   text: "Quit",
                   onClick: () => {

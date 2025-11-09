@@ -7,7 +7,7 @@ const defaultValues = {
     background: "#1e1e2e", // Catppuccin Mocha base
     "background-secondary": "#181825", // surface0
     "background-accent": "#313244", // surface2
-    text: "#cdd6f4", // text
+    text: "white", // text
   },
   ui: {
     "font-family": '"IBM Plex Sans", sans-serif',

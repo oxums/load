@@ -3,5 +3,6 @@
 mod task;
 
 fn main() {
-    load_lib::run()
+    println!("Launching Load UI"); // Edited with Load!
+    load_lib::run();
 }

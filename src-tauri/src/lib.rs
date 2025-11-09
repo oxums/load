@@ -12,6 +12,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tree_sitter::{Language, Parser, Point};
 
+use crate::pools::get_file_queue_pool;
+
 static READY_ALREADY_CALLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
@@ -52,6 +54,24 @@ struct FileState {
 #[derive(Default)]
 struct EditorState(Mutex<Option<FileState>>);
 
+#[derive(Default)]
+struct InitialPath(Mutex<Option<(String, bool)>>); // (path, is_directory)
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InitialPathInfo {
+    path: String,
+    is_directory: bool,
+}
+
+#[tauri::command]
+fn get_initial_path(state: State<InitialPath>) -> Option<InitialPathInfo> {
+    state.0.lock().unwrap().as_ref().map(|(path, is_dir)| InitialPathInfo {
+        path: path.clone(),
+        is_directory: *is_dir,
+    })
+}
+
 #[tauri::command]
 async fn get_settings() -> String {
     let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
@@ -79,7 +99,7 @@ async fn get_settings() -> String {
 }
 
 #[tauri::command]
-async fn ready() {
+async fn ready(app: AppHandle) {
     if READY_ALREADY_CALLED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -89,7 +109,7 @@ async fn ready() {
     let pool = crate::pools::get_file_queue_pool();
     let current_files = pool.fetch_tasks();
     for file_path in current_files {
-        process_queued_file(&file_path).await;
+        process_queued_file(&app, &file_path).await;
     }
 
     tokio::spawn(async move {
@@ -97,7 +117,7 @@ async fn ready() {
             pool.wait_for_task();
             let new_files = pool.fetch_tasks();
             for file_path in new_files {
-                process_queued_file(&file_path).await;
+                process_queued_file(&app, &file_path).await;
             }
         }
     });
@@ -662,8 +682,11 @@ fn create_empty_file(
     Ok(meta)
 }
 
-async fn process_queued_file(path: &String) {
+async fn process_queued_file(app: &AppHandle, path: &String) {
     println!("Opening file: {}", &path);
+    app.emit("queue-file-open", path)
+        .map_err(|e| eprintln!("Failed to emit queue-file-open event: {}", e))
+        .ok();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -762,14 +785,65 @@ fn delete_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_settings() {
+    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    let load_dir = PathBuf::from(local_app_data).join("load");
+    let settings_path = load_dir.join("settings.json");
+
+    if settings_path.exists() {
+        get_file_queue_pool().add_task(settings_path.to_string_lossy().to_string());
+    }
+}
+
 pub fn run() {
+    // Get command-line arguments
+    let args: Vec<String> = std::env::args().collect();
+    let initial_path_state = InitialPath::default();
+
+    // If there's a second argument (first is the exe path), treat it as a file path
+    if args.len() > 1 {
+        let arg_path = &args[1];
+        println!("CLI argument provided: {}", arg_path);
+
+        // Convert relative path to absolute path based on current directory
+        let path = if Path::new(arg_path).is_absolute() {
+            PathBuf::from(arg_path)
+        } else {
+            let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            println!("Current directory: {:?}", current);
+            current.join(arg_path)
+        };
+
+        println!("Resolved path: {:?}", path);
+        println!("Path exists: {}", path.exists());
+        println!("Path is file: {}", path.is_file());
+        println!("Path is directory: {}", path.is_dir());
+
+        if path.exists() {
+            let is_directory = path.is_dir();
+            let canonical_path = path.canonicalize().unwrap_or(path.clone());
+            let mut path_str = canonical_path.to_string_lossy().to_string();
+            if cfg!(windows) && path_str.starts_with(r"\\?\") {
+                path_str = path_str[4..].to_string();
+            }
+
+            println!("Storing initial path: {} (is_directory: {})", path_str, is_directory);
+            *initial_path_state.0.lock().unwrap() = Some((path_str, is_directory));
+        } else {
+            println!("Path does not exist, not storing");
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(EditorState::default())
+        .manage(initial_path_state)
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            get_initial_path,
             ready,
             open_file,
             create_empty_file,
@@ -785,7 +859,8 @@ pub fn run() {
             close_file,
             copy_path,
             move_path,
-            delete_path
+            delete_path,
+            open_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

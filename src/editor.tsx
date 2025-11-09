@@ -6,7 +6,7 @@ interface LoadFileHandle {
   readLine(num: number): string;
   writeLine(num: number, content: string): void;
   close(): void;
-  reciveUpdate(
+  receiveUpdate(
     callback: (line: number, content: string, totalLines?: number) => void,
   ): void;
   metadata: {
@@ -17,7 +17,7 @@ interface LoadFileHandle {
     lineCount: number;
   };
   requestTokenization(lineStart: number, lineEnd: number): void;
-  recieveTokenization(
+  receiveTokenization(
     callback: (
       tokens: Array<{
         startOffset: TokenOffset;
@@ -838,10 +838,10 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         return m;
       });
     };
-    fileHandle.reciveUpdate((line, content, totalLines) => {
+    fileHandle.receiveUpdate((line, content, totalLines) => {
       off({ line, content, totalLines });
     });
-    fileHandle.recieveTokenization((newTokens) => {
+    fileHandle.receiveTokenization((newTokens) => {
       const grouped = new Map<number, Token[]>();
       const invalidated = new Set<number>();
       newTokens.forEach((t) => {
@@ -1661,7 +1661,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       const cached = renderCacheRef.current.get(cacheKey);
 
       if (cached && cached.version === version) {
-        // Move the entry to the back so it stays hot in the LRU cache.
         renderCacheRef.current.delete(cacheKey);
         renderCacheRef.current.set(cacheKey, cached);
         return cached.node;
@@ -1697,7 +1696,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                 color: tokenColor("untokenized"),
                 whiteSpace: "pre",
               }}
-              
               className="e"
             >
               {segmentContent || " "}
@@ -1724,7 +1722,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                 color: tokenColor("untokenized"),
                 whiteSpace: "pre",
               }}
-              
               className="e"
             >
               {segmentContent || " "}
@@ -1762,8 +1759,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
                   color: tokenColor("untokenized"),
                   whiteSpace: "pre",
                 }}
-                
-                 className="e"
+                className="e"
               >
                 {gap}
               </span>,
@@ -2331,7 +2327,7 @@ export async function createTauriFileHandle(
         } catch {}
       }
     },
-    reciveUpdate(callback) {
+    receiveUpdate(callback) {
       updateCb = callback;
     },
     requestTokenization(lineStart: number, lineEnd: number) {
@@ -2339,7 +2335,7 @@ export async function createTauriFileHandle(
         logError("request_tokenization failed " + (e as Error).message),
       );
     },
-    recieveTokenization(callback) {
+    receiveTokenization(callback) {
       tokenCb = (tokens) => {
         const pieces: Array<{
           startOffset: TokenOffset;
