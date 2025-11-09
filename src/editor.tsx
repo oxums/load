@@ -605,10 +605,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       setWrapCols(cols > 8 ? cols : 0);
     };
 
-    // Initial compute
     computeWrap();
-
-    // Observe container width changes
     const el = containerRef.current;
     const ro = new ResizeObserver(() => {
       computeWrap();
@@ -645,7 +642,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         starts[i] = [0];
         words.forEach((w) => {
           const wLen = w.length;
-          // If adding this word exceeds wrapCols and current segment has content, start new segment
           if (segLen > 0 && segLen + wLen > wrapCols) {
             pos += segLen;
             starts[i].push(pos);
@@ -654,7 +650,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
             segLen += wLen;
           }
         });
-        // finalize segment count
         segs[i] = starts[i].length;
       } else {
         const len = lineStr.length;
@@ -664,7 +659,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         for (let s = 0; s < count; s++) starts[i].push(s * wrapCols);
       }
     }
-    // Ensure every line has at least one start
     for (let i = 0; i < fileLineCount; i++) {
       if (!starts[i] || starts[i].length === 0) {
         starts[i] = [0];
@@ -717,7 +711,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       ) {
         return Math.min(fileLineCount - 1, seg);
       }
-      // binary search over prefixSegments
       let lo = 0;
       let hi = fileLineCount - 1;
       while (lo <= hi) {
@@ -1124,15 +1117,16 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       const fileContent = buffer.lines.join("\n");
       let cursorPosition = 0;
       for (let i = 0; i < useRow; i++) {
-        cursorPosition += buffer.getLine(i).length + 1; // +1 for newline
+        cursorPosition += buffer.getLine(i).length + 1;
       }
       cursorPosition += useCol;
 
       const abortController = new AbortController();
       quickSuggestAbortRef.current = abortController;
 
-      generate_suggestions(fileContent, cursorPosition, useRow)
+      generate_suggestions(fileContent, cursorPosition, useRow, fileHandle.metadata.name)
         .then((suggestions) => {
+          console.log("Received quick suggestions:", suggestions);
           if (!abortController.signal.aborted) {
             setQuickSuggestions(suggestions);
             setQuickSuggestionIndex(0);
@@ -1213,18 +1207,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       quickSuggestionIndex < quickSuggestions.length
     ) {
       const selected = quickSuggestions[quickSuggestionIndex];
-      // Remove the already typed part
-      const line = buffer.getLine(cursor.row);
-      const before = line.slice(0, cursor.col);
-      const typedPart = selected.alreadyTyped;
-
-      // Check if the text before cursor ends with the already typed part
-      if (before.endsWith(typedPart)) {
-        const removeCount = typedPart.length;
-        deleteRange(cursor.row, cursor.col - removeCount, cursor.col);
-        moveCaret(cursor.row, cursor.col - removeCount);
-      }
-
       insertText(selected.suggestion);
       cancelQuickSuggestions();
     }
