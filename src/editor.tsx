@@ -229,6 +229,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const [lineHeightPx, setLineHeightPx] = useState(18);
   const [charWidthPx, setCharWidthPx] = useState(8);
   const [viewportHeight, setViewportHeight] = useState(0);
+  //@ts-ignore
   const [viewportVersion, setViewportVersion] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const [buffer] = useState<FileBuffer>(() => createFileBuffer([]));
@@ -241,7 +242,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const [lineVersions, setLineVersions] = useState<Map<number, number>>(
     () => new Map(),
   );
-  const pendingTokenizationRef = useRef<null>(null);
   const lineVersionsRef = useRef<Map<number, number>>(new Map());
   useEffect(() => {
     lineVersionsRef.current = lineVersions;
@@ -584,6 +584,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const [wrapEnabled, setWrapEnabled] = useState(true);
   const [wrapCols, setWrapCols] = useState(0);
   const [wrapMode, setWrapMode] = useState<"char" | "word">("char");
+  //@ts-ignore
   const [lineSegments, setLineSegments] = useState<number[]>([]);
   const [prefixSegments, setPrefixSegments] = useState<number[]>([]);
   const [segmentStarts, setSegmentStarts] = useState<number[][]>([]);

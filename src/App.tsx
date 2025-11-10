@@ -6,8 +6,7 @@ import {
   useEffect,
   useRef,
   createContext,
-  useContext,
-  useCallback,
+  useContext
 } from "react";
 import type { DragEvent } from "react";
 
@@ -31,22 +30,6 @@ const MenuContext = createContext<{
 });
 
 const MIN_INTERVAL_MS = 150;
-let lastOpenFileTime = 0;
-let lastNewFileTime = 0;
-
-function throttleAsync(
-  fn: (...args: any[]) => Promise<any>,
-  lastTimeRef: { current: number },
-) {
-  return async (...args: any[]) => {
-    const now = Date.now();
-    if (now - lastTimeRef.current < MIN_INTERVAL_MS) {
-      return;
-    }
-    lastTimeRef.current = now;
-    return await fn(...args);
-  };
-}
 
 function WindowUpperMenuTab({
   name,
@@ -343,21 +326,10 @@ function App({ setAIModal }: { setAIModal: (open: boolean) => void }) {
     return tree;
   }
 
-  const basename = (p: string) => {
-    const n = p.replace(/\\/g, "/");
-    const i = n.lastIndexOf("/");
-    return i >= 0 ? n.slice(i + 1) : n;
-  };
-
   const dirname = (p: string) => {
     const n = p.replace(/\\/g, "/");
     const i = n.lastIndexOf("/");
     return i >= 0 ? p.slice(0, i) : "";
-  };
-
-  const joinPath = (dir: string, name: string) => {
-    const sep = dir.includes("\\") ? "\\" : "/";
-    return dir.replace(/[\\/]+$/, "") + sep + name;
   };
 
   const refreshDir = async (dirPath: string) => {

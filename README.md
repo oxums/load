@@ -10,7 +10,3 @@ Zed.dev, my current favorite text editor.
 
 This project was made for the Build-a-thon hackaton and some things aren't polished.
 Copilot AI was used in the development mainly for boilerplate code / boring tasks.
-
-## todo
-
-- general polishing
