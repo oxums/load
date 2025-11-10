@@ -21,7 +21,6 @@ import { listen } from "@tauri-apps/api/event";
 import { createTauriFileHandle } from "./editor";
 import { getIconSvg } from "./icon";
 import { writeText, readText } from "@tauri-apps/plugin-clipboard-manager";
-import { isAIStatusModalOpen } from "./main";
 
 const MenuContext = createContext<{
   openTab: string | null;
@@ -287,14 +286,22 @@ function App({ setAIModal }: { setAIModal: (open: boolean) => void }) {
     if (isDir) {
       return (
         <div key={node.path}>
-          <button
-            className="w-full text-left"
+          <div
+            className="w-full text-left cursor-pointer"
             onClick={() =>
               setExpanded((e) => ({ ...e, [node.path]: !isExpanded }))
             }
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setExpanded((e) => ({ ...e, [node.path]: !isExpanded }));
+              }
+            }}
           >
             {row}
-          </button>
+          </div>
           {isExpanded &&
           Array.isArray(node.children) &&
           node.children.length > 0 ? (
@@ -981,11 +988,11 @@ function App({ setAIModal }: { setAIModal: (open: boolean) => void }) {
                   <div>
                     {openFiles.length > 0 ? (
                       openFiles.map((f) => (
-                        <button
+                        <div
                           key={f.path}
-                          className="w-full text-left"
+                          className="w-full text-left cursor-pointer"
                           draggable
-                          onDragStart={(e: DragEvent<HTMLButtonElement>) => {
+                          onDragStart={(e: DragEvent<HTMLDivElement>) => {
                             dragSourcePathRef.current = f.path;
                             dragOverPathRef.current = null;
                             setIsDragging(true);
@@ -996,7 +1003,10 @@ function App({ setAIModal }: { setAIModal: (open: boolean) => void }) {
                             dragOverPathRef.current = null;
                             setIsDragging(false);
                           }}
-                          onClick={async () => {
+                          onClick={async (e) => {
+                            if ((e.target as HTMLElement).closest("button")) {
+                              return;
+                            }
                             const fh = await createTauriFileHandle(f.path);
                             setFileHandle(fh);
                             setWindowTitle(fh.metadata.name);
@@ -1073,7 +1083,7 @@ function App({ setAIModal }: { setAIModal: (open: boolean) => void }) {
                               ×
                             </button>
                           </div>
-                        </button>
+                        </div>
                       ))
                     ) : (
                       <div className="px-1 py-0.5 text-(--token-comments) text-sm">

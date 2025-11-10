@@ -5,6 +5,8 @@ type TokenOffset = {
 interface LoadFileHandle {
   readLine(num: number): string;
   writeLine(num: number, content: string): void;
+  insertLine(num: number, content: string): void;
+  removeLine(num: number): void;
   close(): void;
   receiveUpdate(
     callback: (line: number, content: string, totalLines?: number) => void,
@@ -47,6 +49,7 @@ import {
   ai_inline_suggest,
   autocompleteSuggestion,
 } from "./autocomplete";
+import { getSettings } from "./settings";
 type Token = {
   startOffset: TokenOffset;
   endOffset: TokenOffset;
@@ -246,18 +249,17 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
   const [fileLineCount, setFileLineCount] = useState<number>(() =>
     Math.max(1, (fileHandle.metadata as any).lineCount ?? 1),
   );
+
   const [settings, setSettings] = useState<any>({});
+
   useEffect(() => {
-    invoke("get_settings")
-      .then((s: any) => {
-        try {
-          const obj = typeof s === "string" ? JSON.parse(s) : s;
-          setSettings(obj || {});
-        } catch {
-          setSettings({});
-        }
+    getSettings()
+      .then((s) => {
+        setSettings(s || {});
       })
-      .catch(() => {});
+      .catch(() => {
+        setSettings({});
+      });
   }, []);
 
   // Autocomplete suggestion system
@@ -405,13 +407,13 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         for (let i = currLen; i < newLen; i++) {
           const content = snap.lines[i] ?? "";
           buffer.insertLine(i, content);
-          invoke("insert_line", { num: i, content }).catch(() => {});
+          fileHandle.insertLine(i, content);
         }
         setFileLineCount(newLen);
       } else if (newLen < currLen) {
         for (let i = currLen - 1; i >= newLen; i--) {
           buffer.removeLine(i);
-          invoke("remove_line", { num: i }).catch(() => {});
+          fileHandle.removeLine(i);
         }
         setFileLineCount(newLen);
       }
@@ -1050,6 +1052,36 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       tokenReqPendingRef.current = null;
     }, 60);
   }, [visibleLines, tokenPool, lineVersions, fileHandle, fileLineCount]);
+  // Prune tokenPool outside a retention window around currently visible lines.
+  // Retention window is configurable via settings.editor["token-retention-lines"] (defaults to 50).
+  useEffect(() => {
+    const retention =
+      settings?.editor?.["token-retention-lines"] != null
+        ? settings.editor["token-retention-lines"]
+        : 50;
+    const minKeep = Math.max(0, firstVisibleLine - retention);
+    const maxKeep = Math.min(fileLineCount - 1, lastVisibleLine + retention);
+    setTokenPool((prev) => {
+      let needsPrune = false;
+      prev.forEach((_v, ln) => {
+        if (ln < minKeep || ln > maxKeep) needsPrune = true;
+      });
+      if (!needsPrune) return prev;
+      const next = new Map<number, { version: number; tokens: Token[] }>();
+      prev.forEach((v, ln) => {
+        if (ln >= minKeep && ln <= maxKeep) next.set(ln, v);
+      });
+      return next;
+    });
+  }, [
+    settings,
+    firstVisibleLine,
+    lastVisibleLine,
+    fileLineCount,
+    tokenPool,
+    setTokenPool,
+  ]);
+
   const moveCaret = useCallback(
     (row: number, col: number) => {
       row = Math.max(0, Math.min(row, Math.max(0, fileLineCount - 1)));
@@ -1081,19 +1113,14 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         for (let i = 1; i < lines.length - 1; i++) {
           currentRow++;
           buffer.insertLine(currentRow, lines[i]);
-          invoke("insert_line", { num: currentRow, content: lines[i] }).catch(
-            (e) => logError("insert_line failed " + (e as Error).message),
-          );
+          fileHandle.insertLine(currentRow, lines[i]);
         }
 
         // Last line: last part of suggestion + after
         currentRow++;
         const lastLineContent = lines[lines.length - 1] + after;
         buffer.insertLine(currentRow, lastLineContent);
-        invoke("insert_line", {
-          num: currentRow,
-          content: lastLineContent,
-        }).catch((e) => logError("insert_line failed " + (e as Error).message));
+        fileHandle.insertLine(currentRow, lastLineContent);
 
         // Update file line count and cursor position
         const linesAdded = lines.length - 1;
@@ -1320,11 +1347,12 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     const newCol = prevLine.length;
     buffer.setLine(cursor.row - 1, merged);
     buffer.removeLine(cursor.row);
+
     fileHandle.writeLine(cursor.row - 1, merged);
-    invoke("remove_line", { num: cursor.row }).catch((e) =>
-      logError("remove_line failed " + (e as Error).message),
-    );
+
+    fileHandle.removeLine(cursor.row);
     moveCaret(cursor.row - 1, newCol);
+
     setFileLineCount((c) => Math.max(1, c - 1));
     const removedRow = cursor.row;
     setTokenPool((prev) => {
@@ -1374,9 +1402,7 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     buffer.setLine(cursor.row, before);
     buffer.insertLine(cursor.row + 1, after);
     fileHandle.writeLine(cursor.row, before);
-    invoke("insert_line", { num: cursor.row + 1, content: after }).catch((e) =>
-      logError("insert_line failed " + (e as Error).message),
-    );
+    fileHandle.insertLine(cursor.row + 1, after);
     const newRow = cursor.row + 1;
     setFileLineCount((c) => c + 1);
     moveCaret(newRow, 0);
@@ -1418,26 +1444,40 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     firstVisibleLine,
     lastVisibleLine,
   ]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       const ctrl = e.ctrlKey || e.metaKey;
       const shift = e.shiftKey;
       const isWord = (ch: string) => /[A-Za-z0-9_]/.test(ch);
+      const affectsCaret =
+        [
+          "ArrowLeft",
+          "ArrowRight",
+          "ArrowUp",
+          "ArrowDown",
+          "Home",
+          "End",
+          "Backspace",
+          "Enter",
+          "Tab",
+        ].includes(e.key) || isPrintableKey(e.nativeEvent);
+      if (affectsCaret) {
+        lastKeydownRef.current = { key: e.key, ts: Date.now() };
+      }
 
-      // Handle Tab for suggestions
       if (e.key === "Tab" && !ctrl && !shift) {
         e.preventDefault();
-        // If inline suggestion is available, accept it
         if (inlineSuggestion) {
           acceptInlineSuggestion();
           return;
         }
-        // If quick suggestions available and no inline suggestion, accept quick suggestion
+
         if (quickSuggestions.length > 0) {
           acceptQuickSuggestion();
           return;
         }
-        // Otherwise, insert spaces (normal Tab behavior)
+
         pushUndoSnapshot();
         const insertion = "  ";
         if (sel) deleteSelection();
@@ -1446,14 +1486,12 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         return;
       }
 
-      // Handle Enter for quick suggestions
       if (e.key === "Enter" && quickSuggestions.length > 0 && !ctrl && !shift) {
         e.preventDefault();
         acceptQuickSuggestion();
         return;
       }
 
-      // Handle Escape to cancel suggestions
       if (e.key === "Escape") {
         if (inlineSuggestion || quickSuggestions.length > 0) {
           e.preventDefault();
@@ -1463,7 +1501,6 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         }
       }
 
-      // Handle arrow keys for quick suggestions navigation
       if (e.key === "ArrowDown" && quickSuggestions.length > 0 && !ctrl) {
         e.preventDefault();
         setQuickSuggestionIndex((prev) =>
@@ -2037,10 +2074,19 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
     }
 
     const caretTop = visualRow * lineHeightPx;
+
     const caretBottom = caretTop + lineHeightPx;
+
     const viewTop = pendingScrollTopRef.current;
+
     const viewBottom = viewTop + viewportHeight;
+
     const margin = Math.max(lineHeightPx, 8) * 2;
+
+    const lk = lastKeydownRef.current;
+    if (!lk || Date.now() - lk.ts > 500) {
+      return;
+    }
 
     let nextScrollTop = viewTop;
     if (caretTop < viewTop + margin) {
@@ -2105,12 +2151,20 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
       }
     }
 
-    // Keep caret vertically visible with margin
     const caretTop = visualRow * lineHeightPx;
+
     const caretBottom = caretTop + lineHeightPx;
+
     const viewTop = pendingScrollTopRef.current;
+
     const viewBottom = viewTop + viewportHeight;
+
     const vMargin = Math.max(lineHeightPx, 8) * 2;
+
+    const lk = lastKeydownRef.current;
+    if (!lk || Date.now() - lk.ts > 500) {
+      return;
+    }
 
     let nextScrollTop = viewTop;
     if (caretTop < viewTop + vMargin) {
@@ -2367,7 +2421,10 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
         onScroll={(e) => {
           setContextMenu(null);
 
+          lastKeydownRef.current = null;
+
           const st = (e.target as HTMLDivElement).scrollTop;
+
           pendingScrollTopRef.current = st;
           if (scrollRafRef.current == null) {
             scrollRafRef.current = requestAnimationFrame(() => {
@@ -2832,22 +2889,19 @@ export function Editor({ fileHandle }: { fileHandle: LoadFileHandle }) {
           );
         })()}
 
-      {/* Inline AI Suggestion */}
       {inlineSuggestion &&
         inlineSuggestionStartPos &&
         (() => {
-          // Calculate how much has already been typed
           const currentLine = buffer.getLine(cursor.row);
           const typedSoFar = currentLine.slice(
             inlineSuggestionStartPos.col,
             cursor.col,
           );
-          // Only show the remaining untyped portion
+
           const remainingSuggestion = inlineSuggestion.slice(typedSoFar.length);
 
           if (!remainingSuggestion) return null;
 
-          // Calculate visual position accounting for wrapping
           let visualRow = cursor.row;
           let visualCol = cursor.col;
 
@@ -2918,6 +2972,11 @@ export async function createTauriFileHandle(
       "file-updated",
       (e) => {
         const { line, content, totalLines } = e.payload as any;
+
+        if (typeof totalLines === "number") {
+          handle.metadata.lineCount = totalLines;
+        }
+
         cache.set(line, content);
         if (updateCb) updateCb(line, content, totalLines);
       },
@@ -2925,6 +2984,46 @@ export async function createTauriFileHandle(
     unlisten.push(un1);
   } catch (e) {
     logError("listen file-updated failed " + (e as Error).message);
+  }
+
+  try {
+    const unStructure = await listen<{
+      kind: string;
+      start: number;
+      count: number;
+      totalLines: number;
+    }>("file-structure-changed", (e) => {
+      const { kind, start, count, totalLines } = e.payload as any;
+      if (typeof totalLines === "number") {
+        if (kind === "insert" && count > 0) {
+          const shifted = new Map<number, string>();
+          for (const [k, v] of cache.entries()) {
+            if (k >= start) shifted.set(k + count, v);
+            else shifted.set(k, v);
+          }
+          cache.clear();
+          for (const [k, v] of shifted.entries()) cache.set(k, v);
+        } else if (kind === "remove" && count > 0) {
+          const shifted = new Map<number, string>();
+          for (const [k, v] of cache.entries()) {
+            if (k >= start + count) {
+              shifted.set(k - count, v);
+            } else if (k < start) {
+              shifted.set(k, v);
+            }
+          }
+          cache.clear();
+          for (const [k, v] of shifted.entries()) cache.set(k, v);
+        }
+        handle.metadata.lineCount = totalLines;
+      }
+      if (updateCb) {
+        updateCb(start, cache.get(start) ?? "", totalLines);
+      }
+    });
+    unlisten.push(unStructure);
+  } catch (e) {
+    logError("listen file-structure-changed failed " + (e as Error).message);
   }
   try {
     const un2 = await listen<
@@ -2974,6 +3073,48 @@ export async function createTauriFileHandle(
       invoke("write_line", { num, content }).catch((e) =>
         logError("write_line failed " + (e as Error).message),
       );
+    },
+    insertLine(num: number, content: string): void {
+      let idx = num;
+      if (idx < 0) idx = 0;
+      const currentCount = handle.metadata.lineCount;
+      if (idx > currentCount) idx = currentCount;
+      const newCache = new Map<number, string>();
+      for (const [k, v] of cache.entries()) {
+        if (k >= idx) {
+          newCache.set(k + 1, v);
+        } else {
+          newCache.set(k, v);
+        }
+      }
+      cache.clear();
+      for (const [k, v] of newCache.entries()) cache.set(k, v);
+      cache.set(idx, content);
+      handle.metadata.lineCount = currentCount + 1;
+      invoke("insert_line", { num: idx, content }).catch((e) =>
+        logError("insert_line failed " + (e as Error).message),
+      );
+      if (updateCb) updateCb(idx, content, handle.metadata.lineCount);
+    },
+    removeLine(num: number): void {
+      if (num < 0 || num >= handle.metadata.lineCount) return;
+      const newCache = new Map<number, string>();
+      for (const [k, v] of cache.entries()) {
+        if (k === num) continue;
+        if (k > num) {
+          newCache.set(k - 1, v);
+        } else {
+          newCache.set(k, v);
+        }
+      }
+      cache.clear();
+      for (const [k, v] of newCache.entries()) cache.set(k, v);
+      handle.metadata.lineCount = Math.max(1, handle.metadata.lineCount - 1);
+      invoke("remove_line", { num }).catch((e) =>
+        logError("remove_line failed " + (e as Error).message),
+      );
+      if (updateCb)
+        updateCb(num, cache.get(num) ?? "", handle.metadata.lineCount);
     },
     close(): void {
       while (unlisten.length) {

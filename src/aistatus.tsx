@@ -17,18 +17,42 @@ export function AIStatus({
   const [isDownloading, setIsDownloading] = useState<boolean>(false);
 
   useEffect(() => {
-    invoke<boolean>("ollama_available").then((available) => {
-      setOllamaAvailable(available);
-    });
+    let cancelled = false;
 
-    getSettings().then((settings) => {
-      invoke<boolean>("ollama_model_is_downloaded", {
-        model: settings.ai,
-      }).then((downloaded) => {
-        setModelDownloaded(downloaded);
+    invoke<boolean>("ollama_available")
+      .then((available) => {
+        if (!cancelled) setOllamaAvailable(available);
+      })
+      .catch(() => {
+        if (!cancelled) setOllamaAvailable(false);
       });
-    });
-  });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isOllamaAvailable !== true) {
+      return;
+    }
+    let cancelled = false;
+
+    getSettings()
+      .then((settings) =>
+        invoke<boolean>("ollama_model_is_downloaded", { model: settings.ai }),
+      )
+      .then((downloaded) => {
+        if (!cancelled) setModelDownloaded(downloaded);
+      })
+      .catch(() => {
+        if (!cancelled) setModelDownloaded(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOllamaAvailable]);
 
   return (
     <div className="absolute top-1/2 left-1/2 -translate-1/2">
@@ -74,17 +98,28 @@ export function AIStatus({
                 ) : (
                   <span className="flex items-center gap-1 text-yellow-500">
                     <span>Not Downloaded</span>
-                    <button onClick={() => {
-                      setIsDownloading(true);
-                      getSettings().then((settings) => {
-                        invoke<void>("ollama_pull_model", {
-                          model: settings.ai,
-                        }).then(() => {
-                          setIsDownloading(false);
-                          setModelDownloaded(true);
-                        });
-                      });
-                    }} className="px-2 py-1 mx-1 rounded bg-(--background-color) text-xs border-(--token-functions) border">
+
+                    <button
+                      disabled={isDownloading}
+                      onClick={() => {
+                        setIsDownloading(true);
+
+                        getSettings()
+                          .then((settings) =>
+                            invoke<void>("ollama_pull_model", {
+                              model: settings.ai,
+                            }),
+                          )
+                          .then(() => {
+                            setModelDownloaded(true);
+                          })
+                          .catch(() => {})
+                          .finally(() => {
+                            setIsDownloading(false);
+                          });
+                      }}
+                      className="px-2 py-1 mx-1 rounded bg-(--background-color) text-xs border-(--token-functions) border disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
                       Download
                     </button>
                   </span>

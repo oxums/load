@@ -328,7 +328,7 @@ export async function ai_inline_suggest(
   
   const response = await invoke<string>("ollama_generate", {
     model: settings.ai,
-    prompt: "Generate a short continuation for the code, only output the continuation DONT ADD any explanations. Code: " + context,
+    prompt: "only output the continuation DONT ADD any explanations. Generate a short continuation for the code: " + context,
   })
   
   console.log("Inline suggestion response: " + response)

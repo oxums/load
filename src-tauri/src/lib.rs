@@ -245,16 +245,33 @@ fn insert_line(
         file.size =
             file.lines.iter().map(|l| l.len()).sum::<usize>() + file.lines.len().saturating_sub(1);
 
+        // Emit structure change event and updated content for affected range
         app.emit(
-            "file-updated",
+            "file-structure-changed",
             serde_json::json!({
-              "line": idx,
-              "content": file.lines[idx],
+
+              "kind": "insert",
+              "start": idx,
+              "count": 1,
               "totalLines": file.lines.len()
+
             }),
         )
         .map_err(|e| e.to_string())
         .ok();
+
+        for i in idx..file.lines.len() {
+            app.emit(
+                "file-updated",
+                serde_json::json!({
+                  "line": i,
+                  "content": file.lines[i],
+                  "totalLines": file.lines.len()
+                }),
+            )
+            .map_err(|e| e.to_string())
+            .ok();
+        }
 
         Ok(())
     } else {
@@ -273,16 +290,34 @@ fn remove_line(app: AppHandle, state: State<'_, EditorState>, num: usize) -> Res
         file.size =
             file.lines.iter().map(|l| l.len()).sum::<usize>() + file.lines.len().saturating_sub(1);
 
+        // Emit structure change event and updated content for affected range
         app.emit(
-            "file-updated",
+            "file-structure-changed",
             serde_json::json!({
-              "line": num,
-              "content": file.lines.get(num).cloned().unwrap_or_default(),
+
+              "kind": "remove",
+              "start": num,
+              "count": 1,
               "totalLines": file.lines.len()
+
             }),
         )
         .map_err(|e| e.to_string())
         .ok();
+
+        for i in num..file.lines.len() {
+            app.emit(
+                "file-updated",
+                serde_json::json!({
+                  "line": i,
+                  "content": file.lines[i],
+                  "totalLines": file.lines.len()
+                }),
+            )
+            .map_err(|e| e.to_string())
+            .ok();
+        }
+
         Ok(())
     } else {
         Err("no file opened".to_string())

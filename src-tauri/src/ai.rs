@@ -1,4 +1,4 @@
- use std::io;
+use std::io;
 use std::process::{Command, Output, Stdio};
 
 #[tauri::command]
@@ -7,12 +7,24 @@ pub fn ollama_available() -> bool {
 }
 
 #[tauri::command]
-pub fn ollama_model_is_downloaded(model: String) -> Result<bool, String> {
+
+pub async fn ollama_model_is_downloaded(model: String) -> Result<bool, String> {
     if !ollama_available() {
         return Err("ollama is not installed or not found in PATH".into());
     }
-
-    let output = run_ollama(&["show", &model]).map_err(|e| format!("failed to run ollama: {e}"))?;
+    
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (tx, rx) = mpsc::channel();
+    let model_clone = model.clone();
+    std::thread::spawn(move || {
+        let res = run_ollama(&["show", &model_clone]);
+        let _ = tx.send(res);
+    });
+    let output = rx
+        .recv_timeout(Duration::from_secs(3))
+        .map_err(|_| "timed out checking model; is the Ollama service running?".to_string())?
+        .map_err(|e| format!("failed to run ollama: {e}"))?;
     Ok(output.status.success())
 }
 

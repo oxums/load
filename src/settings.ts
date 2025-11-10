@@ -14,11 +14,14 @@ const defaultValues = {
     "font-size": "14px",
     "line-height": "1.5",
   },
+
   editor: {
     "font-family": "JetBrains Mono, Menlo, monospace",
     "font-size": "15px",
     "line-height": "1.6",
+    "token-retention-lines": 50,
   },
+
   token: {
     types: "#f5c2e7", // mauve
     numbers: "#fab387", // peach
