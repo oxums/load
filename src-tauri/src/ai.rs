@@ -1,18 +1,34 @@
 use std::io;
 use std::process::{Command, Output, Stdio};
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x00000008;
+
+#[inline]
+fn configure_hidden(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
+}
+
 #[tauri::command]
 pub fn ollama_available() -> bool {
     which::which("ollama").is_ok()
 }
 
 #[tauri::command]
-
 pub async fn ollama_model_is_downloaded(model: String) -> Result<bool, String> {
     if !ollama_available() {
         return Err("ollama is not installed or not found in PATH".into());
     }
-    
+
     use std::sync::mpsc;
     use std::time::Duration;
     let (tx, rx) = mpsc::channel();
@@ -67,21 +83,17 @@ pub async fn ollama_generate(model: String, prompt: String) -> Result<String, St
 }
 
 fn run_ollama(args: &[&str]) -> io::Result<Output> {
-    Command::new("ollama")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    let mut cmd = Command::new("ollama");
+    cmd.args(args);
+    configure_hidden(&mut cmd);
+    cmd.output()
 }
 
 async fn run_ollama_async(args: Vec<String>) -> Result<Output, String> {
     tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new("ollama");
-        cmd.args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(&args);
+        configure_hidden(&mut cmd);
         cmd.output().map_err(|e| e.to_string())
     })
     .await
